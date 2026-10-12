@@ -1,0 +1,193 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentbank"
+dynamic = ["version"]
+description = "Python SDK for Agent Bank: non-custodial, programmable bank accounts for AI agents (USDC on Base Sepolia)."
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Matthew Mangano", email = "matthew.mangano@gmail.com" }]
+keywords = [
+  "agent-bank",
+  "ai-agents",
+  "agents",
+  "payments",
+  "x402",
+  "usdc",
+  "base",
+  "rfc9421",
+  "http-message-signatures",
+  "eip-712",
+  "eip-3009",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Office/Business :: Financial",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
+]
+dependencies = [
+  "httpx>=0.27,<1",
+  "pydantic>=2.7,<3",
+  "eth-account>=0.13",
+  "eth-utils>=5",
+  "typing-extensions>=4.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/bank-of-an-agent/sdk-python"
+Repository = "https://github.com/bank-of-an-agent/sdk-python"
+Issues = "https://github.com/bank-of-an-agent/sdk-python/issues"
+Changelog = "https://github.com/bank-of-an-agent/sdk-python/blob/main/CHANGELOG.md"
+Security = "https://github.com/bank-of-an-agent/sdk-python/blob/main/SECURITY.md"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.25",
+  "pytest-cov>=6",
+  "respx>=0.22",
+  "mypy>=1.15",
+  "ruff>=0.11",
+]
+codegen = ["datamodel-code-generator>=0.28"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.hatch.version]
+path = "src/agentbank/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentbank"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/agentbank",
+  "tests",
+  "examples",
+  "scripts",
+  "openapi.json",
+  "CHANGELOG.md",
+  "SECURITY.md",
+  "LICENSE",
+]
+
+# --------------------------------------------------------------------- ruff
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests", "examples", "scripts"]
+extend-exclude = ["src/agentbank/models.py"]
+
+[tool.ruff.lint]
+select = [
+  "E",    # pycodestyle errors
+  "W",    # pycodestyle warnings
+  "F",    # pyflakes
+  "I",    # isort
+  "B",    # bugbear
+  "UP",   # pyupgrade
+  "SIM",  # simplify
+  "C4",   # comprehensions
+  "RUF",  # ruff-specific
+  "PT",   # pytest style
+  "S",    # bandit (security)
+  "ANN",  # annotations
+  "D",    # docstrings
+  "N",    # naming
+  "PIE",
+  "PL",   # pylint subset
+  "RET",
+  "TID",
+  "T20",  # print
+]
+ignore = [
+  "D105",    # magic methods
+  "D107",    # __init__ documented on the class
+  "D203",    # conflicts with D211
+  "D213",    # conflicts with D212
+  "PLR0913", # SDK methods mirror API fields
+  "PLR0911",
+  "PLR0912",
+  "PLR0915",
+  "PLR2004", # HTTP status literals are clearer inline
+  "S101",    # assert is fine in tests and type narrowing
+  "ANN401",  # Any is sometimes the honest type for JSON
+  "RET505",
+  "SIM108",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D", "ANN", "S105", "S106", "S311", "PLR", "N802", "PLC0415", "SIM117"]
+"examples/**" = ["D", "T20", "S105", "S106", "PLC0415"]
+"scripts/**" = ["T20", "S603", "S607"]
+"src/agentbank/_sync/**" = ["D", "ANN"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+known-first-party = ["agentbank"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+# --------------------------------------------------------------------- mypy
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["src", "tests", "examples", "scripts"]
+mypy_path = "src"
+warn_unreachable = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["eth_account.*", "eth_utils.*", "eth_keys.*", "hexbytes.*"]
+follow_untyped_imports = true
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+# --------------------------------------------------------------------- pytest
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+source = ["agentbank"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+fail_under = 90
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "@overload",
+  "raise NotImplementedError",
+  "\\.\\.\\.$",
+]
