@@ -41,5 +41,23 @@
     "session_address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
     "user_op_hash": "0xde8c75f4a14b7f25ad85c4be7f9affb7b3ea83f0fad7b0c3fa8754dbd0e6383e",
     "signature": "0x9f00e9783617f53eb64dedb4182a85c24a180307a0bf7a494afdc559e042c55772747fa429e7647311ebab3ce1801a844a0aae85b4cb29249434db0d9ac505ca1b"
+  },
+  "early_withdrawal": {
+    "owner_private_key": "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a",
+    "owner_address": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+    "domain": {
+      "name": "AgentBank TimeLockVaults",
+      "version": "1",
+      "chainId": 84532,
+      "verifyingContract": "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+    },
+    "message": {
+      "vaultId": "7",
+      "amount": "15000000",
+      "nonce": "3",
+      "deadline": "1790000900"
+    },
+    "digest": "0x07df5bd0aa5b53945d63c8ce485c99622a615ea4fde5e9b9df204a3163c94f6b",
+    "signature": "0x380c6a5c247d04ac22067a329418dd9493505d0289b6a19d51189060935edf5824e6dfd3fd002bdfba899cb798f42b27ebd8fec69a7beaf31862f7ad359b11821c"
   }
 }

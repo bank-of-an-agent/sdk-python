@@ -177,7 +177,12 @@ def treasury_set(org_id: str, account_id: str) -> OwnerActionPayload:
 
 
 def vault_withdraw(vault_id: str, amount: MoneyInput) -> OwnerActionPayload:
-    """``POST /v1/vaults/{id}/withdraw``: subject = vault id; payload ``{amount}``."""
+    """``vault.withdraw``: subject = vault id; payload ``{amount}``.
+
+    Kept for parity with ``@agentbank/core``. The API does not verify it:
+    early withdrawals from a locked vault are authorized by ``TimeLockVaults``'
+    own ``EarlyWithdrawal`` signature instead (see :mod:`agentbank.early_withdrawal`).
+    """
     return OwnerActionPayload(
         action="vault.withdraw", subject=vault_id, payload={"amount": _money(amount)}
     )

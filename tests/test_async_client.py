@@ -249,8 +249,9 @@ async def test_async_owner_helpers(async_principal: AsyncAgentBank, api: respx.M
     vault_id = id_for("vlt")
     withdraw = api.post(f"/v1/vaults/{vault_id}/withdraw").respond(json=example("Vault"))
     await async_principal.vaults.withdraw(vault_id, amount="1.00", owner=OWNER_KEY)
-    _, auth = authorization(withdraw)
-    check(auth, "vault.withdraw", vault_id, {"amount": {"amount": "1.00", "asset": "USDC"}})
+    assert json.loads(withdraw.calls.last.request.content) == {
+        "amount": {"amount": "1.00", "asset": "USDC"}
+    }
 
     operation_id = id_for("oop")
     api.get(f"/v1/owner-operations/{operation_id}").respond(

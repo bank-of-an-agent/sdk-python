@@ -1,8 +1,9 @@
 """Inputs and results of the multi-step principal helpers.
 
-``AgentBank.grant_session``, ``AgentBank.provision_spend_key`` and
-``AgentBank.setup_agent_account`` (and their async twins) chain several API
-calls and owner signatures; these types describe what they take and return.
+``AgentBank.grant_session``, ``AgentBank.provision_spend_key``,
+``AgentBank.setup_agent_account`` and ``AgentBank.withdraw_vault`` (and their
+async twins) chain several API calls and owner signatures; these types
+describe what they take and return.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from typing_extensions import Required
 from agentbank.canonical import to_jsonable
 from agentbank.errors import BadRequestError
 from agentbank.keys import SessionKey, SignerLike
-from agentbank.models import Account, OwnerOperation, Session, SessionScope
+from agentbank.models import Account, OwnerOperation, Session, SessionScope, Vault
 from agentbank.owner_payloads import with_defaults
 
 __all__ = [
@@ -27,6 +28,7 @@ __all__ = [
     "PermitOptions",
     "SessionGrant",
     "SetupAgentAccountResult",
+    "VaultWithdrawalResult",
     "session_scope_with_expiry",
 ]
 
@@ -97,6 +99,20 @@ class SetupAgentAccountResult:
     account: Account
     session: Session | None
     install_operation: OwnerOperation | None
+
+
+@dataclass(frozen=True)
+class VaultWithdrawalResult:
+    """Result of ``withdraw_vault``.
+
+    Attributes:
+        vault: The vault (read again after the operation when waiting).
+        operation: The signed early-withdrawal owner operation (``None`` when
+            the vault withdrew at once).
+    """
+
+    vault: Vault
+    operation: OwnerOperation | None
 
 
 def session_scope_with_expiry(

@@ -65,6 +65,7 @@ from agentbank.flows import (
     PermitOptions,
     SessionGrant,
     SetupAgentAccountResult,
+    VaultWithdrawalResult,
     session_scope_with_expiry,
 )
 from agentbank.http_signatures import DEFAULT_SIGNATURE_LIFETIME_SECONDS
@@ -600,6 +601,80 @@ class AsyncAgentBank:
             session=granted.session,
             install_operation=granted.install_operation,
         )
+
+    async def withdraw_vault(
+        self,
+        vault_id: str,
+        amount: MoneyInput,
+        *,
+        owner: SignerLike | SessionKey,
+        wait: bool = False,
+        timeout: float = 120.0,
+        poll_interval: float = 2.0,
+        idempotency_key: str | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> VaultWithdrawalResult:
+        """Withdraw from a vault, signing whatever the owner must (principal only).
+
+        Goal vaults, and locked vaults past ``unlock_at``, withdraw at once.
+        Before a locked vault's ``unlock_at``, the ``TimeLockVaults`` contract
+        needs the owner's EIP-712 ``EarlyWithdrawal`` signature: this checks the
+        API's challenge against the vault, the deployment (``GET /v1/meta``)
+        and ``amount``, signs it, resends the withdrawal, then signs the owner
+        operation that carries it on-chain::
+
+            result = bank.withdraw_vault(vault.id, "15.00", owner=owner_key, wait=True)
+            print(result.operation.status if result.operation else "withdrawn")
+
+        Args:
+            vault_id: The vault.
+            amount: Decimal string (USDC), ``Decimal`` or ``Money``.
+            owner: The org owner key (the owner of every vault).
+            wait: Wait until the early withdrawal's owner operation is done,
+                then read the vault again.
+            timeout: Seconds to wait when ``wait`` is true.
+            poll_interval: Seconds between status checks.
+            idempotency_key: Optional base key, suffixed per request
+                (``.withdraw``, ``.withdraw.signed``, ``.sign``) so the
+                withdrawal can be retried safely with the same key.
+            request_options: Per-request overrides.
+
+        Raises:
+            BadRequestError: The challenge, or the owner operation the API
+                prepared, is not the requested withdrawal (it is not signed).
+            AgentBankError: ``operation_timeout`` when ``wait`` and the
+                operation is still pending after ``timeout``.
+        """
+        vault, early = await self.vaults._withdraw_as_owner(
+            vault_id,
+            amount,
+            owner,
+            idempotency_key=_step(idempotency_key, "withdraw"),
+            request_options=request_options,
+        )
+        if not early or vault.pending_operation_id is None:
+            return VaultWithdrawalResult(vault=vault, operation=None)
+        operation = await self.owner_operations.retrieve(
+            vault.pending_operation_id, request_options=request_options
+        )
+        if operation.purpose != "vault.withdraw" or operation.subject_id != vault.id:
+            raise BadRequestError(
+                "invalid_request",
+                f"Refusing to sign owner operation {operation.id}: it is a {operation.purpose} "
+                f"for {operation.subject_id}, not the withdrawal from vault {vault.id}",
+            )
+        operation = await self.owner_operations.sign_and_submit(
+            operation,
+            owner=owner,
+            wait=wait,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            idempotency_key=_step(idempotency_key, "sign"),
+            request_options=request_options,
+        )
+        if wait:
+            vault = await self.vaults.retrieve(vault_id, request_options=request_options)
+        return VaultWithdrawalResult(vault=vault, operation=operation)
 
     async def _attach_spend_key(
         self,

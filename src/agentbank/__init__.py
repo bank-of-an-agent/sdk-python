@@ -15,7 +15,7 @@ Testnet only (Base Sepolia). Quick tour::
 Everything is also available asynchronously via :class:`AsyncAgentBank`.
 """
 
-from agentbank import flows, models, owner_payloads, spend_key
+from agentbank import early_withdrawal, flows, models, owner_payloads, spend_key
 from agentbank._async.client import AsyncAgentBank
 from agentbank._async.x402 import AsyncX402Transport
 from agentbank._base_client import RequestOptions
@@ -24,6 +24,7 @@ from agentbank._sync.x402 import X402Transport
 from agentbank._version import __version__
 from agentbank.canonical import canonical_json, canonical_keccak, canonical_sha256
 from agentbank.chains import BASE_SEPOLIA, assert_testnet
+from agentbank.early_withdrawal import early_withdrawal_typed_data, sign_early_withdrawal
 from agentbank.eip712 import (
     OWNER_ACTIONS,
     OwnerAction,
@@ -58,7 +59,7 @@ from agentbank.errors import (
     UnprocessableEntityError,
     X402Error,
 )
-from agentbank.flows import GrantSessionResult, SetupAgentAccountResult
+from agentbank.flows import GrantSessionResult, SetupAgentAccountResult, VaultWithdrawalResult
 from agentbank.http_signatures import content_digest, sign_request, verify_request
 from agentbank.keys import EthSigner, SessionKey, generate_session_key, generate_spend_key
 from agentbank.money import format_amount, money, parse_amount
@@ -102,6 +103,7 @@ __all__ = [
     "SetupAgentAccountResult",
     "SignatureVerificationError",
     "UnprocessableEntityError",
+    "VaultWithdrawalResult",
     "WebhookEvent",
     "X402Error",
     "X402Receipt",
@@ -113,6 +115,8 @@ __all__ = [
     "canonical_sha256",
     "construct_event",
     "content_digest",
+    "early_withdrawal",
+    "early_withdrawal_typed_data",
     "flows",
     "format_amount",
     "generate_session_key",
@@ -123,6 +127,7 @@ __all__ = [
     "owner_authorize",
     "owner_payloads",
     "parse_amount",
+    "sign_early_withdrawal",
     "sign_request",
     "sign_spend_key_permit",
     "sign_webhook",

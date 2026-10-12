@@ -695,12 +695,14 @@ def test_owner_signed_unfreeze_treasury_and_vault(
     assert body == sweep_rule.payload
     _verify(sweep_rule, authorization)
 
+    # A vault that withdraws at once needs no owner signature; early withdrawals
+    # from locked vaults answer the API's challenge (tests/test_early_withdrawal.py).
     vault_id = id_for("vlt")
     withdraw = api.post(f"/v1/vaults/{vault_id}/withdraw").respond(json=example("Vault"))
     principal.vaults.withdraw(vault_id, amount="5.00", owner=OWNER_KEY)
-    body, authorization = _authorization(withdraw)
-    assert body == {"amount": {"amount": "5.00", "asset": "USDC"}}
-    _verify(owner_payloads.vault_withdraw(vault_id, "5.00"), authorization)
+    assert json.loads(withdraw.calls.last.request.content) == {
+        "amount": {"amount": "5.00", "asset": "USDC"}
+    }
 
 
 def test_owner_operation_sign_and_submit(principal: AgentBank, api: respx.MockRouter) -> None:

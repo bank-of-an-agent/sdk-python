@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from datetime import datetime
 from typing import Any, Literal
 
 from agentbank import _operations as ops
-from agentbank import owner_payloads
 from agentbank._async.resources._base import AsyncAPIResource
 from agentbank._base_client import RequestOptions
 from agentbank._resource_helpers import compact
+from agentbank.early_withdrawal import early_withdrawal_typed_data, sign_early_withdrawal
+from agentbank.errors import OwnerSignatureRequiredError
 from agentbank.keys import SessionKey, SignerLike
 from agentbank.models import ListVaultsResponse, Vault
 from agentbank.money import MoneyInput, coerce_money
@@ -22,7 +23,8 @@ class AsyncVaults(AsyncAPIResource):
     """Goal vaults (ledger pockets) and time-locked vaults (``TimeLockVaults``).
 
     Agents may deposit; only the principal withdraws, and early withdrawal from
-    a locked vault needs the owner key.
+    a locked vault needs the owner key's ``EarlyWithdrawal`` signature (see
+    :mod:`agentbank.early_withdrawal`).
     """
 
     async def create(
@@ -133,23 +135,104 @@ class AsyncVaults(AsyncAPIResource):
     ) -> Vault:
         """Withdraw from a vault back to its account (principal only).
 
-        Before a locked vault's ``unlock_at``, the owner must authorize
-        ``vault.withdraw`` (subject = ``vault_id``, payload ``{"amount": ...}``).
+        Goal vaults, and locked vaults past ``unlock_at``, withdraw at once.
+        Before a locked vault's ``unlock_at`` the ``TimeLockVaults`` contract
+        needs the owner's EIP-712 ``EarlyWithdrawal`` signature, not a
+        ``vault.withdraw`` owner authorization: without one the API raises
+        :class:`~agentbank.OwnerSignatureRequiredError` whose
+        ``extensions["typed_data"]`` describes what to sign. With ``owner``, the
+        SDK answers that challenge (checked with
+        :meth:`early_withdrawal_typed_data` first) and resends the withdrawal
+        under ``{idempotency_key}.signed``; the vault then comes back with
+        ``pending_operation_id``, the owner operation that carries the signature.
+        Sign it with ``owner_operations.sign_and_submit``, or use
+        ``AgentBank.withdraw_vault``, which does every step.
 
         Args:
             vault_id: The vault.
             amount: Decimal string (USDC), ``Decimal`` or ``Money``.
-            owner_authorization: A pre-signed ``vault.withdraw`` authorization.
-            owner: Alternatively, the owner key; the SDK signs it.
+            owner_authorization: An ``EarlyWithdrawal`` signed elsewhere (e.g. a
+                hardware wallet, over :meth:`early_withdrawal_typed_data`):
+                ``{"signer", "signature", "issued_at", "expires_at"}`` with
+                ``expires_at`` = the signed ``deadline``. Send it under a new
+                idempotency key: the API stores the challenge under the first one.
+            owner: Alternatively, the owner key: answer the challenge automatically.
             idempotency_key: Optional key; generated when omitted.
             request_options: Per-request overrides.
+
+        Raises:
+            OwnerSignatureRequiredError: An early withdrawal without ``owner``
+                or ``owner_authorization``; ``extensions["typed_data"]`` holds
+                the challenge.
+            BadRequestError: With ``owner``, the challenge is not the requested
+                withdrawal (nothing is signed).
         """
-        withdrawal = owner_payloads.vault_withdraw(vault_id, amount)
-        body: dict[str, Any] = dict(withdrawal.payload)
+        if owner is not None and owner_authorization is None:
+            vault, _ = await self._withdraw_as_owner(
+                vault_id,
+                amount,
+                owner,
+                idempotency_key=idempotency_key,
+                request_options=request_options,
+            )
+            return vault
+        return await self._withdraw(
+            vault_id,
+            amount,
+            owner_authorization,
+            idempotency_key=idempotency_key,
+            request_options=request_options,
+        )
+
+    async def early_withdrawal_typed_data(
+        self,
+        vault_id: str,
+        *,
+        amount: MoneyInput,
+        typed_data: Mapping[str, Any],
+        request_options: RequestOptions | None = None,
+    ) -> dict[str, Any]:
+        """Check an early-withdrawal challenge and build the typed data the owner signs.
+
+        Compares the API's ``typed_data`` with the vault (``onchain_id`` and
+        ``contract_address``, else ``meta.contracts["vaults"]``), the deployment's
+        chain (``GET /v1/meta``) and ``amount``; see
+        :func:`agentbank.early_withdrawal.early_withdrawal_typed_data`. Sign the
+        result with a wallet's ``eth_signTypedData_v4``, or with
+        :func:`agentbank.sign_early_withdrawal` for a software key.
+
+        Args:
+            vault_id: The vault.
+            amount: The amount being withdrawn.
+            typed_data: ``extensions["typed_data"]`` of the API's
+                ``owner_signature_required`` error.
+            request_options: Per-request overrides.
+
+        Raises:
+            BadRequestError: ``invalid_request`` when the challenge differs.
+        """
+        vault = await self.retrieve(vault_id, request_options=request_options)
+        meta = await self._client.meta(request_options=request_options)
+        return early_withdrawal_typed_data(
+            typed_data,
+            chain_id=meta.chain_id,
+            contract=vault.contract_address or meta.contracts.get("vaults"),
+            onchain_id=vault.onchain_id,
+            amount=amount,
+        )
+
+    async def _withdraw(
+        self,
+        vault_id: str,
+        amount: MoneyInput,
+        owner_authorization: dict[str, Any] | None,
+        *,
+        idempotency_key: str | None,
+        request_options: RequestOptions | None,
+    ) -> Vault:
+        body: dict[str, Any] = {"amount": coerce_money(amount)}
         if owner_authorization is not None:
             body["owner_authorization"] = owner_authorization
-        elif owner is not None:
-            body["owner_authorization"] = await self._owner_authorization(owner, withdrawal)
         return await self._request(
             ops.WITHDRAW_VAULT,
             Vault,
@@ -158,3 +241,39 @@ class AsyncVaults(AsyncAPIResource):
             idempotency_key=idempotency_key,
             request_options=request_options,
         )
+
+    async def _withdraw_as_owner(
+        self,
+        vault_id: str,
+        amount: MoneyInput,
+        owner: SignerLike | SessionKey,
+        *,
+        idempotency_key: str | None,
+        request_options: RequestOptions | None,
+    ) -> tuple[Vault, bool]:
+        """Withdraw, answering an early-withdrawal challenge; also says whether one came."""
+        try:
+            vault = await self._withdraw(
+                vault_id,
+                amount,
+                None,
+                idempotency_key=idempotency_key,
+                request_options=request_options,
+            )
+        except OwnerSignatureRequiredError as error:
+            challenge = error.extensions.get("typed_data")
+            if not isinstance(challenge, Mapping):
+                raise
+        else:
+            return vault, False
+        typed_data = await self.early_withdrawal_typed_data(
+            vault_id, amount=amount, typed_data=challenge, request_options=request_options
+        )
+        vault = await self._withdraw(
+            vault_id,
+            amount,
+            sign_early_withdrawal(owner, typed_data),
+            idempotency_key=f"{idempotency_key}.signed" if idempotency_key else None,
+            request_options=request_options,
+        )
+        return vault, True
