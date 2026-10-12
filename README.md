@@ -45,7 +45,8 @@ Requires Python 3.10 or later.
 ```python
 from agentbank import AgentBank, PolicyDeniedError, SessionKey
 
-agent = AgentBank(session_key=SessionKey.load(".agentbank/session.json"))  # session id and account from env
+# AGENTBANK_SESSION_ID and AGENTBANK_ACCOUNT_ID come from the environment.
+agent = AgentBank(session_key=SessionKey.load(".agentbank/session.json"))
 
 decision = agent.policies.check(intent={"kind": "transfer", "amount": "12.50", "to_address": payee})
 try:
@@ -70,7 +71,8 @@ with agent, agent.x402.client(max_amount="0.10") as http:
 ```python
 from agentbank import AgentBank, SessionKey
 
-owner = SessionKey.from_env("AGENTBANK_OWNER_KEY")  # a testnet owner key; production keys stay in hardware
+# A testnet owner key; production owner keys stay in hardware wallets or passkeys.
+owner = SessionKey.from_env("AGENTBANK_OWNER_KEY")
 with AgentBank() as bank:  # AGENTBANK_API_KEY and AGENTBANK_BASE_URL from the environment
     agent = bank.agents.create(name="research-agent")
     # See examples/principal_setup.py for the policy, spend key, permit and session steps.
@@ -84,6 +86,8 @@ async usage, a LangChain tool and a webhook receiver.
 | `AGENTBANK_BASE_URL` | API base URL (e.g. `http://localhost:8080`) |
 | `AGENTBANK_API_KEY` | Org API key (principals) |
 | `AGENTBANK_SESSION_ID`, `AGENTBANK_ACCOUNT_ID` | The agent's session and account |
+| `AGENTBANK_SESSION_KEY`, `AGENTBANK_SPEND_KEY` | The agent's keys, if not passed explicitly |
+| `AGENTBANK_FACILITATOR_URL` | x402 facilitator (defaults to the API base URL) |
 
 ## Development
 
