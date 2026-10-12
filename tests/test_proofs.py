@@ -108,6 +108,41 @@ def test_onchain_scope_errors() -> None:
         proofs.onchain_scope(-1, consumer, "0x" + "00" * 32)
 
 
+def test_onchain_scope_ids() -> None:
+    consumer = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    context = "0x" + "AB" * 32
+    scope_id = proofs.onchain_scope_id(84532, consumer, context)
+    assert scope_id == f"eip155:84532:{consumer.lower()}:{context.lower()}"
+    assert proofs.scope_field(scope_id) == proofs.onchain_scope(84532, consumer, context)
+    assert proofs.scope_field(scope_id.upper().replace("EIP155", "eip155").replace("0X", "0x")) == (
+        proofs.scope_field(scope_id)
+    )
+    assert proofs.parse_onchain_scope_id(scope_id) == proofs.OnchainScopeRef(
+        84532, consumer, context.lower()
+    )
+    assert proofs.parse_onchain_scope_id(42) is None  # type: ignore[arg-type]
+    assert not proofs.is_onchain_scope_id("api.seller.example")
+    request = proofs.create_proof_request(
+        scope_id, require=[proofs.reserved_for("1.00", for_seconds=600)], now=NOW
+    )
+    tag = str(proofs.scope_tag(proofs.onchain_scope(84532, consumer, context)))
+    assert request.constraints["reserved_for"].model_dump(exclude_none=True) == {
+        "min": tag,
+        "max": tag,
+    }
+    longest = proofs.onchain_scope_id(10**32 - 1, consumer, context)
+    assert len(longest) == 7 + 32 + 1 + 42 + 1 + 66 <= proofs.MAX_SCOPE_LENGTH
+    data = {**proofs.request_data(request), "scope": longest}
+    assert proofs.parse_proof_request(data).scope == longest
+    for bad in (0, -1, 10**32, True, 1.0):
+        with pytest.raises(ValueError, match="chain_id"):
+            proofs.onchain_scope_id(bad, consumer, context)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="consumer"):
+        proofs.onchain_scope_id(1, "0x1234", context)
+    with pytest.raises(ValueError, match="context"):
+        proofs.onchain_scope_id(1, consumer, "0x00")
+
+
 def test_nonces() -> None:
     nonce = proofs.random_nonce()
     assert len(nonce) == 64

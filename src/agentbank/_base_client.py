@@ -9,6 +9,7 @@ parsing responses. The sync and async clients only add the I/O loop.
 from __future__ import annotations
 
 import email.utils
+import math
 import os
 import platform
 import random
@@ -29,6 +30,7 @@ from agentbank.chains import assert_testnet
 from agentbank.errors import APIResponseValidationError, ConfigurationError
 from agentbank.http_signatures import MAX_SIGNATURE_LIFETIME_SECONDS, sign_request
 from agentbank.keys import EthSigner, SessionKey, SignerLike, to_signer
+from agentbank.proofs import DEFAULT_MAX_PRESENTATIONS_PER_SCOPE_PER_HOUR
 
 __all__ = [
     "DEFAULT_BASE_URL",
@@ -120,6 +122,7 @@ class ClientConfig:
     max_retries: int
     signature_lifetime_seconds: int
     default_headers: dict[str, str] = field(default_factory=dict, repr=False)
+    max_presentations_per_scope_per_hour: float = DEFAULT_MAX_PRESENTATIONS_PER_SCOPE_PER_HOUR
 
     @classmethod
     def resolve(
@@ -137,10 +140,17 @@ class ClientConfig:
         max_retries: int,
         signature_lifetime_seconds: int,
         default_headers: Mapping[str, str] | None,
+        max_presentations_per_scope_per_hour: float = DEFAULT_MAX_PRESENTATIONS_PER_SCOPE_PER_HOUR,
     ) -> ClientConfig:
         """Merge explicit arguments with ``AGENTBANK_*`` environment variables."""
         if chain_id is not None:
             assert_testnet(chain_id)
+        limit = max_presentations_per_scope_per_hour
+        whole = isinstance(limit, int) and not isinstance(limit, bool)
+        if not (whole or limit == math.inf) or limit < 0:
+            raise ConfigurationError(
+                "max_presentations_per_scope_per_hour must be a non-negative integer (or math.inf)"
+            )
         if max_retries < 0:
             raise ConfigurationError("max_retries must be >= 0")
         if not 0 < signature_lifetime_seconds <= MAX_SIGNATURE_LIFETIME_SECONDS:
@@ -174,6 +184,7 @@ class ClientConfig:
             max_retries=max_retries,
             signature_lifetime_seconds=signature_lifetime_seconds,
             default_headers=dict(default_headers or {}),
+            max_presentations_per_scope_per_hour=limit,
         )
 
     @property

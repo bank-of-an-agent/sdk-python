@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 
@@ -16,10 +16,11 @@ from agentbank._base_client import RequestOptions
 from agentbank._resource_helpers import compact
 from agentbank._sync.proofs import ProofTransport
 from agentbank._sync.resources._base import APIResource
-from agentbank.chains import DEFAULT_CHAIN_ID, assert_testnet
+from agentbank.chains import DEFAULT_CHAIN_ID, LOCKED_MAINNET_CHAIN_IDS, assert_testnet
 from agentbank.errors import (
     AgentBankError,
     ConfigurationError,
+    MainnetLockedError,
     NotFoundError,
     ProofRefusedError,
     ProverError,
@@ -46,6 +47,7 @@ from agentbank.proofs import (
     DISCLOSURE_CLASSES,
     MAX_U64,
     PROOF_SECRET_ENV,
+    PresentationLimiter,
     ProofGate,
     ProofReceipt,
     Prover,
@@ -58,6 +60,7 @@ from agentbank.proofs import (
     bounds,
     from_bytes32,
     needs_reservation,
+    parse_onchain_scope_id,
     parse_proof_request,
     presentation_data,
     proof_secret_from_env,
@@ -67,6 +70,9 @@ from agentbank.proofs import (
     scope_field,
     select_reservation,
 )
+
+if TYPE_CHECKING:
+    from agentbank._sync.client import AgentBank
 
 __all__ = ["Proofs"]
 
@@ -101,7 +107,20 @@ class Proofs(APIResource):
     credentials); principals configure what each agent may disclose
     (:meth:`update_settings`); agents enroll, reserve funds for a verifier and
     :meth:`prove`. See :mod:`agentbank.proofs` for the protocol.
+
+    Proofs to one verifier scope are limited to the client's
+    ``max_presentations_per_scope_per_hour`` (default 30) in any hour: the
+    probing guard (:attr:`limiter`).
     """
+
+    def __init__(self, client: AgentBank) -> None:
+        super().__init__(client)
+        self._limiter = PresentationLimiter(client.config.max_presentations_per_scope_per_hour)
+
+    @property
+    def limiter(self) -> PresentationLimiter:
+        """The probing guard shared by :meth:`prove` and the proof transports."""
+        return self._limiter
 
     # ------------------------------------------------------------------ public
 
@@ -523,10 +542,15 @@ class Proofs(APIResource):
     ) -> ProofPresentation:
         """Prove a verifier's request (agent): fetch the witness, then run the prover.
 
-        When the request asks for reserved funds and no ``reservation_id`` is
-        given, the active reservation that satisfies it is picked (latest
-        expiry, then lowest id). The witness is checked against the request
-        before proving, so an unprovable request is refused in milliseconds.
+        For an HTTP verifier, or for an on-chain consumer (scope
+        :func:`~agentbank.proofs.onchain_scope_id`; submit the result with
+        :func:`~agentbank.proofs.to_claims_verifier_args`). When the request asks
+        for reserved funds and no ``reservation_id`` is given, the active
+        reservation that satisfies it is picked (latest expiry, then lowest id).
+        The witness is checked against the request before proving, so an
+        unprovable request is refused in milliseconds. The probing guard allows
+        ``max_presentations_per_scope_per_hour`` proofs per scope in any hour;
+        refusals and errors do not count.
 
         Args:
             request: The verifier's request (from ``AGENT-PROOF-REQUIRED``).
@@ -546,12 +570,19 @@ class Proofs(APIResource):
             ProofRequestError: The request is malformed.
             ProofRefusedError: The attested facts cannot prove it (``unsatisfiable``,
                 ``undisclosed``, ``chain_mismatch``, ``reservation_required``,
-                ``witness_mismatch``).
+                ``witness_mismatch``), or the probing guard refused (``rate_limited``).
             ProverError: No secret, no prover, or the prover failed.
-            MainnetLockedError: The request is for a mainnet.
+            MainnetLockedError: The request (or its consuming contract) is on a mainnet.
         """
         parsed = parse_proof_request(request)
         assert_testnet(parsed.chain_id)
+        onchain = parse_onchain_scope_id(parsed.scope)
+        if onchain is not None and onchain.chain_id in LOCKED_MAINNET_CHAIN_IDS:
+            raise MainnetLockedError(
+                "mainnet_locked",
+                f"The proof request is for a contract on chain {onchain.chain_id}, a mainnet. "
+                "Agent Bank is testnet-only.",
+            )
         resolved_secret = _secret(secret)
         runner = _prover(prover)
         if not runner.configured:
@@ -560,15 +591,20 @@ class Proofs(APIResource):
                 "No prover is configured: set AGENTBANK_PROVER to the agentbank-prove command",
             )
         account = self._account(account_id)
-        if reservation_id is None and needs_reservation(parsed):
-            reservation_id = self._matching_reservation(account, parsed, request_options)
-        witness = self.witness(
-            account, reservation_id=reservation_id, root=root, request_options=request_options
-        )
-        assert_provable(witness, parsed)
-        presentation = runner.prove(secret=resolved_secret, witness=witness, request=parsed)
-        if presentation.request_hash.lower() != request_hash(parsed):
-            raise ProverError("prover_failed", "The prover answered another request")
+        release = self._limiter.take(parsed.scope)
+        try:
+            if reservation_id is None and needs_reservation(parsed):
+                reservation_id = self._matching_reservation(account, parsed, request_options)
+            witness = self.witness(
+                account, reservation_id=reservation_id, root=root, request_options=request_options
+            )
+            assert_provable(witness, parsed)
+            presentation = runner.prove(secret=resolved_secret, witness=witness, request=parsed)
+            if presentation.request_hash.lower() != request_hash(parsed):
+                raise ProverError("prover_failed", "The prover answered another request")
+        except BaseException:
+            release()
+            raise
         return presentation
 
     def _matching_reservation(

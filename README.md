@@ -109,6 +109,10 @@ def handle(request):
     # result.nullifier is this agent's stable pseudonym for your scope; add result.headers.
 ```
 
+`gate.check` verifies and uses the proof up in one step. In front of a paywall, `gate.peek(headers)`
+verifies without using it up (answer the `402`; the agent's paid retry carries the same proof) and
+`gate.commit(result)` uses it up when you serve (`False` on a replay).
+
 An agent proves with the `agentbank-prove` CLI of the TypeScript monorepo (proving needs the
 circuit's WebAssembly witness generator); its secret only ever goes to the prover's stdin.
 The owner first enables proofs and chooses what may be disclosed
@@ -121,6 +125,24 @@ agent.proofs.enroll()  # once: registers Poseidon(secret), never the secret
 agent.proofs.reserve("500.00", scope="api.seller.example", expires_at=tomorrow)  # proof of funds
 with agent.x402.client(max_amount="0.10") as http:
     response = http.get("https://api.seller.example/v1/data")  # answers the 401, then the 402
+```
+
+The client gives one verifier scope at most 30 proofs an hour
+(`AgentBank(max_presentations_per_scope_per_hour=...)`), refusing more with
+`ProofRefusedError` reason `rate_limited`: many questions with different thresholds would narrow
+the attested values down.
+
+A contract that admits agents with `AgentClaimsVerifier.verifyAndConsume` asks for its on-chain
+scope id, `onchain_scope_id(chain_id, consumer, context)` (`eip155:<chainId>:<consumer>:<context>`,
+which maps to the contract's `scopeOf(consumer, context)`). The agent proves it explicitly (the
+transports never answer on-chain scopes), and `to_claims_verifier_args` builds the calldata:
+
+```python
+from agentbank.proofs import create_proof_request, onchain_scope_id, to_claims_verifier_args
+
+request = create_proof_request(onchain_scope_id(84532, consumer, context), require=[...])
+args = to_claims_verifier_args(request, agent.proofs.prove(request))
+verifier.functions.verify(args.claims.as_tuple(), args.proof.as_tuple(), 16, 7200).call()  # web3.py
 ```
 
 Runnable scripts are in [`examples/`](examples): principal setup, agent payment, x402 fetch,

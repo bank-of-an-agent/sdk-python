@@ -82,6 +82,7 @@ from agentbank.models import (
     SigningRequest,
 )
 from agentbank.money import MoneyInput
+from agentbank.proofs import DEFAULT_MAX_PRESENTATIONS_PER_SCOPE_PER_HOUR
 from agentbank.spend_key import MAX_UINT256, sign_spend_key_permit
 
 __all__ = ["AgentBank"]
@@ -124,6 +125,11 @@ class AgentBank:
         default_headers: Headers added to every request.
         http_client: Your own ``httpx.Client`` (proxies, mTLS, ...). It must
             not add authentication of its own.
+        max_presentations_per_scope_per_hour: Private proofs' probing guard: at most
+            this many proofs to one verifier scope in any hour (default 30; ``0``
+            refuses every proof, ``math.inf`` disables the guard). A verifier asking
+            many questions with different thresholds could otherwise narrow down the
+            attested values.
     """
 
     orgs: Orgs
@@ -165,6 +171,7 @@ class AgentBank:
         signature_lifetime_seconds: int = DEFAULT_SIGNATURE_LIFETIME_SECONDS,
         default_headers: Mapping[str, str] | None = None,
         http_client: httpx.Client | None = None,
+        max_presentations_per_scope_per_hour: float = DEFAULT_MAX_PRESENTATIONS_PER_SCOPE_PER_HOUR,
     ) -> None:
         self._config = ClientConfig.resolve(
             api_key=api_key,
@@ -179,6 +186,7 @@ class AgentBank:
             max_retries=max_retries,
             signature_lifetime_seconds=signature_lifetime_seconds,
             default_headers=default_headers,
+            max_presentations_per_scope_per_hour=max_presentations_per_scope_per_hour,
         )
         self._meta: Meta | None = None
         self._owns_http_client = http_client is None

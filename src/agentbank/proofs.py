@@ -44,11 +44,13 @@ import hashlib
 import hmac
 import inspect
 import json
+import math
 import os
 import re
 import secrets
 import shlex
 import subprocess
+import threading
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -87,6 +89,7 @@ __all__ = [
     "ATTRIBUTE_INFO",
     "CLAIMS_SCHEMA",
     "CLASS_ATTRIBUTES",
+    "DEFAULT_MAX_PRESENTATIONS_PER_SCOPE_PER_HOUR",
     "DEFAULT_MAX_ROOT_AGE_SECONDS",
     "DEFAULT_MIN_ANONYMITY_SET",
     "DEFAULT_PROVER_TIMEOUT",
@@ -118,9 +121,14 @@ __all__ = [
     "AttributeInfo",
     "AttributeKind",
     "Bounds",
+    "ClaimsVerifierArgs",
+    "ClaimsVerifierClaims",
+    "ClaimsVerifierProof",
     "Constraints",
     "DisclosureClass",
     "MemoryReplayCache",
+    "OnchainScopeRef",
+    "PresentationLimiter",
     "ProofChallenge",
     "ProofEnvelope",
     "ProofFailureReason",
@@ -166,12 +174,15 @@ __all__ = [
     "gate_nonce",
     "generate_proof_secret",
     "is_disclosed",
+    "is_onchain_scope_id",
     "load_verification_key",
     "merge_constraints",
     "needs_reservation",
     "nonce_field",
     "onchain_scope",
+    "onchain_scope_id",
     "parse_bound_value",
+    "parse_onchain_scope_id",
     "parse_presentation",
     "parse_proof_request",
     "parse_usdc_bound",
@@ -192,6 +203,7 @@ __all__ = [
     "select_reservation",
     "spending_capped_at",
     "to_bytes32",
+    "to_claims_verifier_args",
     "verified_company",
     "verified_principal",
     "verify_groth16",
@@ -436,15 +448,88 @@ def _check_scope(scope_id: object) -> str:
     return scope_id
 
 
-def scope_field(scope_id: str) -> int:
-    """The scope of an HTTP verifier: ``keccak256(utf8(SCOPE_DOMAIN + ":" + scope_id)) mod r``.
+#: ``eip155:<chainId>:<consumer>:<context>``: the chain id in base 10 (1 to 32 digits, no
+#: leading zero), the consumer as ``0x`` + 40 and the context as ``0x`` + 64 hex digits (either
+#: case). Host names never contain ``:``, so no HTTP scope looks like one.
+_ONCHAIN_SCOPE_ID_RE = re.compile(
+    r"eip155:([1-9][0-9]{0,31}):(0x[0-9a-fA-F]{40}):(0x[0-9a-fA-F]{64})"
+)
 
-    ``scope_id`` is the verifier's host name, or any identifier of 1 to 253 characters.
+
+@dataclass(frozen=True)
+class OnchainScopeRef:
+    """The parts of an on-chain scope id (:func:`parse_onchain_scope_id`).
+
+    Attributes:
+        chain_id: The chain the consuming contract is on.
+        consumer: The consuming contract (``msg.sender`` of ``verifyAndConsume``), checksummed.
+        context: The consumer's 32-byte context, lowercase hex.
+    """
+
+    chain_id: int
+    consumer: str
+    context: str
+
+
+def onchain_scope_id(chain_id: int, consumer: str, context: str) -> str:
+    """The scope id of an on-chain consumer: ``eip155:<chainId>:<consumer>:<context>``.
+
+    Hex comes out in lowercase. A proof request carries it as ``scope``, and
+    :func:`scope_field` maps it to ``AgentClaimsVerifier.scopeOf(consumer, context)`` on
+    ``chain_id``, so the proof is accepted by ``verifyAndConsume`` called by ``consumer``.
+
+    Args:
+        chain_id: Chain the consuming contract is on (positive, at most 32 digits).
+        consumer: The consuming contract's address (any case).
+        context: The 32-byte context the consumer passes to ``verifyAndConsume``.
+
+    Raises:
+        ValueError: An argument is malformed.
+    """
+    if not _is_int(chain_id) or not 0 < chain_id < 10**32:
+        raise ValueError("chain_id must be a positive integer of at most 32 digits")
+    if not _matches(_ADDRESS_RE, consumer):
+        raise ValueError("consumer must be a 0x-prefixed 20-byte hex address")
+    if not _matches(_BYTES32_RE, context):
+        raise ValueError("context must be 0x-prefixed 32-byte hex")
+    return f"eip155:{chain_id}:{consumer.lower()}:{context.lower()}"
+
+
+def parse_onchain_scope_id(scope_id: str) -> OnchainScopeRef | None:
+    """The chain, consumer and context of an on-chain scope id; ``None`` for any other scope."""
+    value: object = scope_id  # callers may pass anything
+    match = _ONCHAIN_SCOPE_ID_RE.fullmatch(value) if isinstance(value, str) else None
+    if match is None:
+        return None
+    chain, consumer, context = match.groups()
+    return OnchainScopeRef(
+        chain_id=int(chain),
+        consumer=str(to_checksum_address(consumer.lower())),
+        context=context.lower(),
+    )
+
+
+def is_onchain_scope_id(scope_id: str) -> bool:
+    """Whether ``scope_id`` is an on-chain scope id (``eip155:<chainId>:<consumer>:<context>``)."""
+    return parse_onchain_scope_id(scope_id) is not None
+
+
+def scope_field(scope_id: str) -> int:
+    """The field element of a scope id (1 to 253 characters).
+
+    * An on-chain scope id ``eip155:<chainId>:<consumer>:<context>`` (see
+      :func:`onchain_scope_id`) maps to :func:`onchain_scope`, which equals
+      ``AgentClaimsVerifier.scopeOf(consumer, context)`` on that chain.
+    * Any other identifier (an HTTP verifier's host name) maps to
+      ``keccak256(utf8(SCOPE_DOMAIN + ":" + scope_id)) mod r``.
 
     Raises:
         ValueError: ``scope_id`` is empty or longer than 253 characters.
     """
     _check_scope(scope_id)
+    onchain = parse_onchain_scope_id(scope_id)
+    if onchain is not None:
+        return onchain_scope(onchain.chain_id, onchain.consumer, onchain.context)
     digest = keccak(_js_utf8(f"{SCOPE_DOMAIN}:{scope_id}"))
     return int.from_bytes(digest, "big") % SNARK_SCALAR_FIELD
 
@@ -453,6 +538,7 @@ def onchain_scope(chain_id: int, consumer: str, context: str) -> int:
     """The scope of an on-chain consumer, ``AgentClaimsVerifier.scopeOf(consumer, context)``.
 
     ``keccak256(abi.encode("agentbank.proofs.scope.v1", chainId, consumer, context)) mod r``.
+    Requests name it with :func:`onchain_scope_id`.
 
     Args:
         chain_id: Chain the verifier contract is on.
@@ -1366,6 +1452,112 @@ def public_signals(request: RequestLike, presentation: PresentationLike) -> list
     return [str(v) for v in values]
 
 
+@dataclass(frozen=True)
+class ClaimsVerifierClaims:
+    """``IAgentClaimsVerifier.Claims``: the statement a proof is checked against on-chain.
+
+    Attributes:
+        root: The presented root (bytes32 hex, lowercase).
+        nullifier: The agent's pseudonym for the scope.
+        scope: ``scope_field(request.scope)``; ``scopeOf(consumer, context)`` for an
+            on-chain scope id.
+        nonce: The request's nonce.
+        mins: Lower bounds, 13 in circuit order (``uint64[13]``).
+        maxs: Upper bounds, 13 in circuit order (``uint64[13]``).
+    """
+
+    root: str
+    nullifier: int
+    scope: int
+    nonce: int
+    mins: tuple[int, ...]
+    maxs: tuple[int, ...]
+
+    def as_tuple(self) -> tuple[bytes, int, int, int, list[int], list[int]]:
+        """The struct in ABI order, as ``web3.py`` and ``eth_abi`` take it."""
+        root = bytes.fromhex(self.root[2:])
+        return (root, self.nullifier, self.scope, self.nonce, list(self.mins), list(self.maxs))
+
+
+@dataclass(frozen=True)
+class ClaimsVerifierProof:
+    """``IAgentClaimsVerifier.Groth16Proof`` in the generated verifier's calldata order.
+
+    As snarkjs ``exportSolidityCallData`` writes it: each pair of ``b`` is swapped
+    relative to the snarkjs JSON proof.
+    """
+
+    a: tuple[int, int]
+    b: tuple[tuple[int, int], tuple[int, int]]
+    c: tuple[int, int]
+
+    def as_tuple(self) -> tuple[list[int], list[list[int]], list[int]]:
+        """The struct in ABI order, as ``web3.py`` and ``eth_abi`` take it."""
+        return (list(self.a), [list(pair) for pair in self.b], list(self.c))
+
+
+@dataclass(frozen=True)
+class ClaimsVerifierArgs:
+    """The ``claims`` and ``proof`` of ``AgentClaimsVerifier.verify`` and ``verifyAndConsume``.
+
+    Attributes:
+        claims: Built from the verifier's request and the presented root and nullifier.
+        proof: The Groth16 proof in calldata order.
+    """
+
+    claims: ClaimsVerifierClaims
+    proof: ClaimsVerifierProof
+
+
+def to_claims_verifier_args(
+    request: RequestLike, presentation: PresentationLike
+) -> ClaimsVerifierArgs:
+    """``AgentClaimsVerifier`` calldata for the verifier's request and the agent's presentation.
+
+    Scope, nonce and bounds come from ``request`` (never from the agent); root,
+    nullifier and proof from ``presentation``. For ``verifyAndConsume`` the request's
+    scope must be :func:`onchain_scope_id` of the calling contract and its context::
+
+        args = to_claims_verifier_args(request, presentation)
+        verifier.functions.verifyAndConsume(
+            context, args.claims.as_tuple(), args.proof.as_tuple(), 16, 7200
+        )
+
+    Raises:
+        ProofRequestError: The request is malformed.
+        ValueError: The presentation is malformed or answers another request
+            (``request_hash``).
+    """
+    data = _parse_request_data(request)
+    try:
+        shown = _parse_presentation_data(presentation)
+    except (_SchemaError, TypeError, ValueError) as exc:
+        raise ValueError(f"invalid presentation: {exc}") from None
+    if shown["request_hash"].lower() != request_hash(data):
+        raise ValueError("the presentation answers another request (request_hash mismatch)")
+    b = bounds(data)
+    proof = shown["proof"]
+    pi_a, pi_b, pi_c = proof["pi_a"], proof["pi_b"], proof["pi_c"]
+    return ClaimsVerifierArgs(
+        claims=ClaimsVerifierClaims(
+            root=to_bytes32(from_bytes32(shown["root"])),
+            nullifier=from_bytes32(shown["nullifier"]),
+            scope=scope_field(data["scope"]),
+            nonce=nonce_field(data["nonce"]),
+            mins=b.mins,
+            maxs=b.maxs,
+        ),
+        proof=ClaimsVerifierProof(
+            a=(int(pi_a[0]), int(pi_a[1])),
+            b=(
+                (int(pi_b[0][1]), int(pi_b[0][0])),
+                (int(pi_b[1][1]), int(pi_b[1][0])),
+            ),
+            c=(int(pi_c[0]), int(pi_c[1])),
+        ),
+    )
+
+
 def load_verification_key() -> Mapping[str, Any]:
     """The bundled snarkjs verification key of the claims circuit.
 
@@ -2019,6 +2211,21 @@ class ProofGate(_GateCore):
         else:
             ...  # serve; add result.headers; result.nullifier identifies the agent here
 
+    ``check`` verifies and uses the proof's nonce up in one step. In front of a
+    paywall, :meth:`peek` verifies without using it up and :meth:`commit` uses it
+    up when the resource is served, so the agent's paid retry can carry the same
+    proof::
+
+        result = gate.peek(request.headers)
+        if result.kind == "proof-required":
+            ...  # 401 with result.response
+        elif not paid(request):
+            ...  # 402: the proof stays valid for the paid retry
+        elif not gate.commit(result):
+            ...  # a replay: 401 with gate.challenge("nonce_reused")
+        else:
+            ...  # serve
+
     Args:
         scope: The verifier's scope, normally its host name.
         key: HMAC key for stateless nonces, at least 32 bytes (strings are UTF-8).
@@ -2070,9 +2277,24 @@ class ProofGate(_GateCore):
         self._cache: ReplayCache = replay_cache if replay_cache is not None else MemoryReplayCache()
 
     def check(self, headers: HeaderSource) -> ProofGateResult:
-        """Check a request's ``AGENT-PROOF`` header.
+        """Check a request's ``AGENT-PROOF`` header and use its nonce up (one step).
 
-        Root resolver errors propagate (answer 5xx: fail closed).
+        :meth:`peek` then :meth:`commit` when the resource may still be refused
+        after the proof (a payment is missing). Root resolver errors propagate
+        (answer 5xx: fail closed).
+        """
+        result = self.peek(headers)
+        if isinstance(result, ProofRequired) or self.commit(result):
+            return result
+        return self._required("nonce_reused")
+
+    def peek(self, headers: HeaderSource) -> ProofGateResult:
+        """Verify a request's ``AGENT-PROOF`` header like :meth:`check`, leaving its nonce unused.
+
+        Serve the resource only after :meth:`commit` returns ``True``; until then
+        the same proof can be presented again (e.g. with the payment a paywall asked
+        for), so a gated paid resource costs the agent one proof. Root resolver
+        errors propagate (answer 5xx: fail closed).
         """
         decoded = self._decode(headers)
         if isinstance(decoded, ProofRequired):
@@ -2094,10 +2316,18 @@ class ProofGate(_GateCore):
         )
         if not result.valid:
             return self._required(result.reason)
-        assert result.request is not None
-        if not self._cache.consume(result.request.nonce, result.request.expires_at, now):
-            return self._required("nonce_reused")
         return self._verified(result)
+
+    def commit(self, result: ProofVerified) -> bool:
+        """Use up the nonce of a :meth:`peek` result, right before serving the resource.
+
+        Returns ``False`` when it was used meanwhile (a replay): answer
+        ``gate.challenge("nonce_reused")`` instead of serving.
+        """
+        if not isinstance(result, ProofVerified):
+            raise TypeError("commit takes a verified result of peek()")
+        request = result.request
+        return self._cache.consume(request.nonce, request.expires_at, self._clock())
 
 
 class AsyncProofGate(_GateCore):
@@ -2141,9 +2371,19 @@ class AsyncProofGate(_GateCore):
         )
 
     async def check(self, headers: HeaderSource) -> ProofGateResult:
-        """Check a request's ``AGENT-PROOF`` header.
+        """Check a request's ``AGENT-PROOF`` header and use its nonce up (one step).
 
-        Root resolver errors propagate (answer 5xx: fail closed).
+        See :meth:`ProofGate.check`; :meth:`peek` and :meth:`commit` split it.
+        """
+        result = await self.peek(headers)
+        if isinstance(result, ProofRequired) or await self.commit(result):
+            return result
+        return self._required("nonce_reused")
+
+    async def peek(self, headers: HeaderSource) -> ProofGateResult:
+        """Verify a request's ``AGENT-PROOF`` header, leaving its nonce unused.
+
+        See :meth:`ProofGate.peek`.
         """
         decoded = self._decode(headers)
         if isinstance(decoded, ProofRequired):
@@ -2166,13 +2406,17 @@ class AsyncProofGate(_GateCore):
         )
         if not result.valid:
             return self._required(result.reason)
-        assert result.request is not None
-        consumed = await _resolve(
-            self._cache.consume(result.request.nonce, result.request.expires_at, now)
-        )
-        if not consumed:
-            return self._required("nonce_reused")
         return self._verified(result)
+
+    async def commit(self, result: ProofVerified) -> bool:
+        """Use up the nonce of a :meth:`peek` result; ``False`` on a replay.
+
+        See :meth:`ProofGate.commit`.
+        """
+        if not isinstance(result, ProofVerified):
+            raise TypeError("commit takes a verified result of peek()")
+        request = result.request
+        return await _resolve(self._cache.consume(request.nonce, request.expires_at, self._clock()))
 
 
 # ===================================================================== proving
@@ -2183,6 +2427,84 @@ PROVER_ENV: Final = "AGENTBANK_PROVER"
 PROOF_SECRET_ENV: Final = "AGENTBANK_PROOF_SECRET"  # noqa: S105 (a variable name)
 #: Seconds the prover may run (proving takes about two seconds).
 DEFAULT_PROVER_TIMEOUT: Final = 120.0
+
+#: Default probing guard: presentations per verifier scope in any hour.
+DEFAULT_MAX_PRESENTATIONS_PER_SCOPE_PER_HOUR: Final = 30
+_HOUR_SECONDS: Final = 3_600.0
+
+
+class PresentationLimiter:
+    """Probing guard: at most ``max_per_hour`` presentations per verifier scope in any hour.
+
+    A verifier asking many questions with different thresholds could otherwise
+    narrow down the attested values. ``bank.proofs.prove`` (and so the proof
+    transports) take a slot per proof and give it back when no presentation came
+    out (a refusal or an error). In memory, per client; thread-safe.
+
+    Args:
+        max_per_hour: Non-negative integer; ``0`` refuses every proof, ``math.inf``
+            disables the guard.
+        clock: Monotonic seconds (default :func:`time.monotonic`).
+
+    Raises:
+        ValueError: ``max_per_hour`` is negative or not an integer (or ``math.inf``).
+    """
+
+    def __init__(
+        self,
+        max_per_hour: float = DEFAULT_MAX_PRESENTATIONS_PER_SCOPE_PER_HOUR,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if not (_is_int(max_per_hour) or max_per_hour == math.inf) or max_per_hour < 0:
+            raise ValueError(
+                "max_presentations_per_scope_per_hour must be a non-negative integer (or math.inf)"
+            )
+        self._max = max_per_hour
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._log: dict[str, list[float]] = {}
+
+    @property
+    def max_per_hour(self) -> float:
+        """Presentations allowed per scope in any hour."""
+        return self._max
+
+    def take(self, scope: str) -> Callable[[], None]:
+        """Take a slot for ``scope``; the returned function gives it back.
+
+        Budgets are per scope field element, so every spelling of one on-chain
+        scope id shares one.
+
+        Raises:
+            ProofRefusedError: ``rate_limited`` (with ``retry_after_seconds`` when a
+                slot frees up later).
+            ValueError: ``scope`` is not a valid scope id.
+        """
+        key = str(scope_field(scope))
+        with self._lock:
+            now = self._clock()
+            recent = [t for t in self._log.get(key, ()) if t > now - _HOUR_SECONDS]
+            self._log[key] = recent
+            if len(recent) >= self._max:
+                retry = recent[0] + _HOUR_SECONDS - now if recent else None
+                raise ProofRefusedError(
+                    "rate_limited",
+                    f"Refusing to prove: {len(recent)} presentation(s) to {scope!r} in the last "
+                    f"hour reach max_presentations_per_scope_per_hour ({self._max:g}); a verifier "
+                    "asking many questions can narrow down the attested values",
+                    retry_after_seconds=retry,
+                )
+            recent.append(now)
+
+        def release() -> None:
+            with self._lock:
+                taken = self._log.get(key)
+                if taken is not None and now in taken:
+                    del taken[len(taken) - 1 - taken[::-1].index(now)]
+
+        return release
+
 
 _REFUSAL_REASONS: Final = frozenset(
     {"unsatisfiable", "undisclosed", "witness_mismatch", "chain_mismatch"}

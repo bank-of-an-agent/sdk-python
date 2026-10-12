@@ -9,6 +9,7 @@ pairing check itself is covered by the vector tests. The prover is ``tests/fake_
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import sys
 from collections.abc import Iterator
@@ -45,6 +46,8 @@ from tests.conftest import (
     BASE_URL,
     OWNER_ADDRESS,
     OWNER_KEY,
+    SESSION_ID,
+    SESSION_KEY,
     verify_agent_request,
 )
 from tests.factories import example, id_for
@@ -380,6 +383,99 @@ def test_prove_needs_a_secret_and_a_prover(
         agent.proofs.prove(REQUEST, secret=SECRET, reservation_id=PRV_ID, prover=FAKE_PROVER)
 
 
+def limited_agent(limit: float) -> AgentBank:
+    return AgentBank(
+        session_id=SESSION_ID,
+        session_key=SESSION_KEY,
+        account_id=ACCOUNT_ID,
+        base_url=BASE_URL,
+        max_presentations_per_scope_per_hour=limit,
+    )
+
+
+def test_prove_probing_guard(router: respx.MockRouter, prover_env: Path) -> None:
+    witness = mock_witness(router)
+    with limited_agent(1) as client:
+        assert client.config.max_presentations_per_scope_per_hour == 1
+        assert client.proofs.limiter.max_per_hour == 1
+        # A refusal or an error gives the slot back.
+        router.get(WITNESS_URL).respond(200, json={**WITNESS, "disclosure_mask": 1})
+        with pytest.raises(ProofRefusedError) as undisclosed:
+            client.proofs.prove(REQUEST, reservation_id=PRV_ID)
+        assert undisclosed.value.reason == "undisclosed"
+        witness = mock_witness(router)
+        client.proofs.prove(REQUEST, reservation_id=PRV_ID)
+        fetched = witness.call_count
+        with pytest.raises(ProofRefusedError, match="max_presentations") as limited:
+            client.proofs.prove(REQUEST, reservation_id=PRV_ID)
+        assert limited.value.reason == "rate_limited"
+        assert limited.value.code == "rate_limited"
+        assert limited.value.retry_after_seconds is not None
+        assert 3_500 < limited.value.retry_after_seconds <= 3_600
+        assert limited.value.extensions["retry_after_seconds"] == limited.value.retry_after_seconds
+        assert witness.call_count == fetched  # refused before fetching a witness
+        # Another scope has its own budget.
+        other = proofs.create_proof_request("other.example", require=[proofs.verified_company()])
+        client.proofs.prove(other)
+    assert len(prover_calls(prover_env)) == 2
+    with limited_agent(0) as closed:
+        with pytest.raises(ProofRefusedError) as refused:
+            closed.proofs.prove(REQUEST, reservation_id=PRV_ID)
+        assert refused.value.reason == "rate_limited"
+        assert refused.value.retry_after_seconds is None
+    with limited_agent(math.inf) as open_:
+        for _ in range(3):
+            open_.proofs.prove(REQUEST, reservation_id=PRV_ID)
+    for bad in (-1, 1.5, True, "30"):
+        with pytest.raises(ConfigurationError, match="max_presentations"):
+            limited_agent(bad)  # type: ignore[arg-type]
+
+
+def test_presentation_limiter_window() -> None:
+    clock = [1_000.0]
+    limiter = proofs.PresentationLimiter(2, clock=lambda: clock[0])
+    release = limiter.take("a.example")
+    limiter.take("a.example")
+    with pytest.raises(ProofRefusedError) as full:
+        limiter.take("a.example")
+    assert full.value.retry_after_seconds == 3_600
+    release()
+    release()  # idempotent
+    limiter.take("a.example")
+    clock[0] += 3_600.5  # the window slides: both slots free again
+    limiter.take("a.example")
+    limiter.take("a.example")
+    with pytest.raises(ProofRefusedError):
+        limiter.take("a.example")
+    # One budget per scope, however an on-chain scope id is spelled.
+    scope_id = proofs.onchain_scope_id(84532, "0x" + "ab" * 20, "0x" + "cd" * 32)
+    limiter.take(scope_id)
+    limiter.take(scope_id.replace("0xab", "0xAB"))
+    with pytest.raises(ProofRefusedError):
+        limiter.take(scope_id.upper().replace("EIP155", "eip155").replace("0X", "0x"))
+    assert proofs.PresentationLimiter().max_per_hour == 30
+    with pytest.raises(ValueError, match="non-negative"):
+        proofs.PresentationLimiter(-1)
+
+
+def test_prove_on_chain_scopes(
+    agent: AgentBank, router: respx.MockRouter, prover_env: Path
+) -> None:
+    consumer = "0x00000000000000000000000000000000000a11ce"
+    context = "0x" + "42" * 32
+    mock_witness(router)
+    request = proofs.create_proof_request(
+        proofs.onchain_scope_id(84532, consumer, context), require=[proofs.verified_company()]
+    )
+    assert agent.proofs.prove(request).request_hash == proofs.request_hash(request)
+    on_mainnet = proofs.create_proof_request(
+        proofs.onchain_scope_id(8453, consumer, context), require=[proofs.verified_company()]
+    )
+    with pytest.raises(MainnetLockedError, match="contract on chain 8453"):
+        agent.proofs.prove(on_mainnet)
+    assert len(prover_calls(prover_env)) == 1
+
+
 async def test_async_prove(
     async_agent: AsyncAgentBank, router: respx.MockRouter, prover_env: Path
 ) -> None:
@@ -534,6 +630,32 @@ def test_proof_transport_refusals(
         agent.proofs.client().get(RESOURCE_URL)
 
 
+def test_proof_transport_never_answers_on_chain_scopes(
+    agent: AgentBank, router: respx.MockRouter, prover_env: Path
+) -> None:
+    scope = proofs.onchain_scope_id(84532, "0x" + "77" * 20, "0x" + "01" * 32)
+    mock_witness(router)
+    router.get(RESOURCE_URL).mock(side_effect=ProofSeller(scope=scope))
+    with agent.proofs.client(allowed_scopes=[scope]) as http:
+        with pytest.raises(ProofError, match="on-chain scope") as refused:
+            http.get(RESOURCE_URL)
+    assert refused.value.reason == "scope_not_allowed"
+    assert prover_calls(prover_env) == []
+
+
+def test_proof_transport_applies_the_probing_guard(
+    router: respx.MockRouter, prover_env: Path
+) -> None:
+    mock_witness(router)
+    router.get(RESOURCE_URL).mock(side_effect=ProofSeller())
+    with limited_agent(1) as client, client.proofs.client() as http:
+        assert http.get(RESOURCE_URL).status_code == 200
+        with pytest.raises(ProofRefusedError) as limited:
+            http.get(RESOURCE_URL)  # a fresh challenge: a second proof to the same scope
+    assert limited.value.reason == "rate_limited"
+    assert len(prover_calls(prover_env)) == 1
+
+
 @pytest.mark.parametrize("consume_on_verify", [False, True], ids=["lenient", "consuming"])
 def test_x402_client_answers_a_proof_then_a_payment(
     agent: AgentBank, router: respx.MockRouter, prover_env: Path, consume_on_verify: bool
@@ -618,6 +740,30 @@ async def test_async_proof_transport_refusals(
         assert rejected.value.reason == "proof_rejected"
         resource.respond(200, headers={"AGENT-PROOF-RESPONSE": "garbage"})
         assert proof_receipt(await http.get(RESOURCE_URL)) is None
+        onchain = proofs.onchain_scope_id(84532, "0x" + "77" * 20, "0x" + "01" * 32)
+        resource.mock(side_effect=ProofSeller(scope=onchain))
+        with pytest.raises(ProofError, match="on-chain scope"):
+            await http.get(RESOURCE_URL)
+
+
+async def test_async_prove_probing_guard(router: respx.MockRouter, prover_env: Path) -> None:
+    async with AsyncAgentBank(
+        session_id=SESSION_ID,
+        session_key=SESSION_KEY,
+        account_id=ACCOUNT_ID,
+        base_url=BASE_URL,
+        max_presentations_per_scope_per_hour=1,
+    ) as client:
+        router.get(WITNESS_URL).respond(200, json={**WITNESS, "disclosure_mask": 1})
+        with pytest.raises(ProofRefusedError) as undisclosed:
+            await client.proofs.prove(REQUEST, reservation_id=PRV_ID)
+        assert undisclosed.value.reason == "undisclosed"
+        mock_witness(router)
+        await client.proofs.prove(REQUEST, reservation_id=PRV_ID)
+        with pytest.raises(ProofRefusedError) as limited:
+            await client.proofs.prove(REQUEST, reservation_id=PRV_ID)
+        assert limited.value.reason == "rate_limited"
+    assert len(prover_calls(prover_env)) == 1
 
 
 # --------------------------------------------------------------------- the real prover

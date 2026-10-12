@@ -21,6 +21,7 @@ from agentbank.proofs import (
     decode_proof_required,
     decode_proof_response,
     encode_proof,
+    is_onchain_scope_id,
 )
 
 if TYPE_CHECKING:
@@ -47,7 +48,9 @@ class ProofTransport(httpx.BaseTransport):
 
     By default only a verifier whose scope is the request's host is answered (a
     proof for another scope could be relayed to that verifier); ``allowed_scopes``
-    lists other scopes to answer. Each proved response carries an
+    lists other scopes to answer. On-chain scope ids (``eip155:...``) are never
+    answered here. Proofs count against the client's probing guard
+    (``max_presentations_per_scope_per_hour``). Each proved response carries an
     :class:`agentbank.proofs.ProofReceipt` (:func:`agentbank.proofs.proof_receipt`).
 
     Args:
@@ -89,7 +92,8 @@ class ProofTransport(httpx.BaseTransport):
         Raises:
             ProofError: ``scope_not_allowed``, ``invalid_header`` or
                 ``proof_rejected`` (the verifier refused the proof).
-            ProofRefusedError: The agent's attested facts cannot prove the request.
+            ProofRefusedError: The agent's attested facts cannot prove the request,
+                or the probing guard refused (``rate_limited``).
             ProverError: No secret or prover, or the prover failed.
         """
         request.read()  # buffer the body so the request can be replayed
@@ -103,6 +107,14 @@ class ProofTransport(httpx.BaseTransport):
             response.close()
 
         proof_request = decode_proof_required(challenge)
+        if is_onchain_scope_id(proof_request.scope):
+            # Never answered over HTTP, even when allowed: the server could submit the proof to
+            # that contract as this agent. Prove on-chain requests with bank.proofs.prove.
+            raise ProofError(
+                "scope_not_allowed",
+                f"{request.url.host} asked for a proof for the on-chain scope "
+                f"{proof_request.scope!r}; prove on-chain requests explicitly with proofs.prove",
+            )
         scope = proof_request.scope.lower()
         if scope != request.url.host.lower() and scope not in self._allowed_scopes:
             raise ProofError(

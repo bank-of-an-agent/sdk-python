@@ -394,6 +394,7 @@ PROOF_REASON_CODES: Mapping[str, str] = {
     "chain_mismatch": "proof_refused",
     "reservation_required": "proof_refused",
     "reservation_pending": "proof_refused",
+    "rate_limited": "rate_limited",
     "secret_missing": "configuration_error",
     "prover_not_configured": "configuration_error",
     "prover_failed": "prover_error",
@@ -412,7 +413,7 @@ class ProofError(AgentBankError):
             ``invalid_input`` (the prover rejected its input),
             ``scope_not_allowed`` (a verifier asked for a proof for another scope),
             ``unsatisfiable``, ``undisclosed``, ``witness_mismatch``, ``chain_mismatch``,
-            ``reservation_required``, ``reservation_pending``
+            ``reservation_required``, ``reservation_pending``, ``rate_limited``
             (refusals, :class:`ProofRefusedError`),
             ``secret_missing``, ``prover_not_configured``, ``prover_failed``,
             ``prover_timeout`` (:class:`ProverError`), and ``proof_rejected``
@@ -466,14 +467,17 @@ class ProofRefusedError(ProofError):
     attributes the owner did not disclose), ``witness_mismatch`` (the secret and
     the witness do not hash to the root: wrong secret or a stale witness),
     ``chain_mismatch`` (the witness is for another chain or registry than the
-    request) ``reservation_required`` (the request needs funds reserved for the verifier
-    and no active reservation matches) and ``reservation_pending`` (one matches but
-    is not in a published root yet).
+    request), ``reservation_required`` (the request needs funds reserved for the verifier
+    and no active reservation matches), ``reservation_pending`` (one matches but
+    is not in a published root yet) and ``rate_limited`` (the probing guard:
+    ``max_presentations_per_scope_per_hour`` proofs to this scope in the last hour).
 
     Attributes:
         attributes: Attributes whose attested values are outside the bounds.
         undisclosed_classes: Disclosure classes the request constrains that the
             owner did not disclose.
+        retry_after_seconds: For ``rate_limited``, when the next proof to that scope
+            is allowed (``None`` when the guard refuses every proof).
     """
 
     def __init__(
@@ -483,17 +487,18 @@ class ProofRefusedError(ProofError):
         *,
         attributes: tuple[str, ...] = (),
         undisclosed_classes: tuple[str, ...] = (),
+        retry_after_seconds: float | None = None,
     ) -> None:
-        super().__init__(
-            reason,
-            detail,
-            extensions={
-                "attributes": list(attributes),
-                "undisclosed_classes": list(undisclosed_classes),
-            },
-        )
+        extensions: dict[str, Any] = {
+            "attributes": list(attributes),
+            "undisclosed_classes": list(undisclosed_classes),
+        }
+        if retry_after_seconds is not None:
+            extensions["retry_after_seconds"] = retry_after_seconds
+        super().__init__(reason, detail, extensions=extensions)
         self.attributes = attributes
         self.undisclosed_classes = undisclosed_classes
+        self.retry_after_seconds = retry_after_seconds
 
 
 class ProverError(ProofError):

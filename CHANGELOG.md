@@ -25,6 +25,21 @@ versions may contain breaking changes.
   payment challenge (402) in one request, keeping the proof on the paid retry.
 - Owner actions `proofs.disclose` and `proofs.reservation.release`; webhook events
   `proof_settings.updated` and `proof_reservation.{created,released,expired}`.
+- On-chain consumers: `onchain_scope_id(chain_id, consumer, context)` builds the scope id
+  `eip155:<chainId>:<consumer>:<context>`, which `scope_field` maps to
+  `AgentClaimsVerifier.scopeOf(consumer, context)` (`parse_onchain_scope_id`,
+  `is_onchain_scope_id`); `to_claims_verifier_args(request, presentation)` returns the
+  `claims` and `proof` arguments of `verify` / `verifyAndConsume` (`as_tuple()` for web3.py).
+  Reservations tag on-chain scopes like any other. The proof transports never answer an
+  on-chain scope (`scope_not_allowed`); prove it with `bank.proofs.prove`, which refuses a
+  consumer on a mainnet (`mainnet_locked`).
+- Probing guard, as in the TypeScript SDK: at most `max_presentations_per_scope_per_hour`
+  (client option, default 30) proofs per verifier scope in any hour through `bank.proofs.prove`
+  and the transports; more are refused with `ProofRefusedError` reason `rate_limited` and
+  `retry_after_seconds`. `PresentationLimiter` is the guard.
+- `ProofGate.peek()` / `commit()` (and the async gate's): verify without using the proof's nonce
+  up, then use it up when the resource is served, so a gate in front of a paywall accepts the
+  agent's paid retry with the same proof. `check()` still does both in one step.
 
 ## [0.1.0] - Unreleased
 

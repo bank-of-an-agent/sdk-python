@@ -32,6 +32,7 @@ VECTORS: dict[str, Any] = json.loads(
     (Path(__file__).parent / "proof_vectors.json").read_text("utf-8")
 )
 PROOF = VECTORS["proof"]
+ONCHAIN_PROOF = VECTORS["onchain_proof"]
 GATE = PROOF["gate"]
 NOW = 1_760_000_100
 REGISTRY = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
@@ -139,6 +140,40 @@ def test_onchain_scopes(case: dict[str, Any]) -> None:
     assert str(proofs.scope_tag(scope)) == case["tag"]
 
 
+@pytest.mark.parametrize(
+    "case", VECTORS["onchain_scope_ids"], ids=lambda c: f"{c['chain_id']}-{c['consumer'][:8]}"
+)
+def test_onchain_scope_ids(case: dict[str, Any]) -> None:
+    scope_id = proofs.onchain_scope_id(int(case["chain_id"]), case["consumer"], case["context"])
+    assert scope_id == case["scope_id"]
+    parsed = proofs.parse_onchain_scope_id(scope_id)
+    assert parsed == proofs.OnchainScopeRef(
+        chain_id=int(case["parsed"]["chain_id"]),
+        consumer=case["parsed"]["consumer"],
+        context=case["parsed"]["context"],
+    )
+    scope = proofs.scope_field(scope_id)
+    assert str(scope) == case["scope"]
+    assert proofs.to_bytes32(scope) == case["scope_bytes32"]
+    assert str(proofs.scope_tag_of(scope_id)) == case["tag"]
+    assert scope == proofs.onchain_scope(parsed.chain_id, parsed.consumer, parsed.context)
+
+
+@pytest.mark.parametrize("case", VECTORS["scope_id_cases"], ids=lambda c: c["scope_id"][:28])
+def test_scope_id_cases(case: dict[str, Any]) -> None:
+    assert proofs.is_onchain_scope_id(case["scope_id"]) is case["onchain"]
+    assert str(proofs.scope_field(case["scope_id"])) == case["scope"]
+    assert str(proofs.scope_tag_of(case["scope_id"])) == case["tag"]
+
+
+@pytest.mark.parametrize(
+    "case", VECTORS["invalid_onchain_scope_ids"], ids=lambda c: f"{c['chain_id']}-{c['consumer']}"
+)
+def test_invalid_onchain_scope_ids(case: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):  # noqa: PT011 (the builder raises plain ValueErrors)
+        proofs.onchain_scope_id(int(case["chain_id"]), case["consumer"], case["context"])
+
+
 # --------------------------------------------------------------------- bounds
 
 
@@ -183,6 +218,11 @@ def build_request(name: str) -> ProofRequest:
                 counterparties=3,
             ),
         ]
+    elif name == "onchain_scope":
+        scope = proofs.onchain_scope_id(
+            FIXED["chain_id"], ONCHAIN_PROOF["consumer"], ONCHAIN_PROOF["context"]
+        )
+        require = [proofs.verified_company(), proofs.reserved_for("25.00", until=NOW + 86_400)]
     else:
         require = [
             proofs.verified_principal(),
@@ -296,6 +336,131 @@ async def test_async_gate_accepts_the_vector_once() -> None:
     second = await gate.check(headers)
     assert second.kind == "proof-required"
     assert second.reason == "nonce_reused"
+
+
+def claims_args_json(args: proofs.ClaimsVerifierArgs) -> dict[str, Any]:
+    """``AgentClaimsVerifier`` arguments as the vectors carry them (``claimsArgsJson``)."""
+    claims, proof = args.claims, args.proof
+    return {
+        "claims": {
+            "root": claims.root,
+            "nullifier": str(claims.nullifier),
+            "scope": str(claims.scope),
+            "nonce": str(claims.nonce),
+            "mins": [str(v) for v in claims.mins],
+            "maxs": [str(v) for v in claims.maxs],
+        },
+        "proof": {
+            "a": [str(v) for v in proof.a],
+            "b": [[str(v) for v in pair] for pair in proof.b],
+            "c": [str(v) for v in proof.c],
+        },
+    }
+
+
+def test_claims_verifier_args_match_typescript() -> None:
+    args = proofs.to_claims_verifier_args(PROOF["request"], PROOF["presentation"])
+    assert claims_args_json(args) == PROOF["claims_verifier_args"]
+
+
+def test_onchain_proof_verifies_with_its_calldata() -> None:
+    v = ONCHAIN_PROOF
+    request, presentation = v["request"], v["presentation"]
+    expected_scope = proofs.onchain_scope(v["chain_id"], v["consumer"], v["context"])
+    assert request["scope"] == proofs.onchain_scope_id(v["chain_id"], v["consumer"], v["context"])
+    assert proofs.scope_field(request["scope"]) == expected_scope
+    assert proofs.request_hash(request) == v["request_hash"]
+    signals = proofs.public_signals(request, presentation)
+    assert signals == v["public_signals"]
+    assert signals[2] == str(expected_scope)
+    result = proofs.verify_presentation(
+        request, presentation, root_info=root_info(v["root_info"]), now=v["now"]
+    )
+    assert result.valid, result.reason
+    args = proofs.to_claims_verifier_args(request, presentation)
+    assert claims_args_json(args) == v["claims_verifier_args"]
+    # The Groth16 check AgentClaimsVerifier runs on these arguments: signals from the claims,
+    # the proof with each pair of b swapped back to snarkjs order.
+    claims, proof = args.claims, args.proof
+    rebuilt = [
+        str(v)
+        for v in (
+            claims.nullifier,
+            int(claims.root, 16),
+            claims.scope,
+            claims.nonce,
+            *claims.mins,
+            *claims.maxs,
+        )
+    ]
+    assert rebuilt == signals
+    snarkjs_proof = {
+        "pi_a": [str(proof.a[0]), str(proof.a[1]), "1"],
+        "pi_b": [[str(pair[1]), str(pair[0])] for pair in proof.b] + [["1", "0"]],
+        "pi_c": [str(proof.c[0]), str(proof.c[1]), "1"],
+        "protocol": "groth16",
+        "curve": "bn128",
+    }
+    assert proofs.verify_groth16(None, rebuilt, snarkjs_proof)
+    root, nullifier, scope, nonce, mins, maxs = claims.as_tuple()
+    assert root == bytes.fromhex(presentation["root"][2:])
+    assert (nullifier, scope, nonce) == (claims.nullifier, claims.scope, claims.nonce)
+    assert len(mins) == len(maxs) == proofs.ATTRIBUTE_COUNT
+    assert proof.as_tuple() == (list(proof.a), [list(p) for p in proof.b], list(proof.c))
+
+
+def test_claims_verifier_args_refuse_mismatched_inputs() -> None:
+    with pytest.raises(ValueError, match="request_hash"):
+        proofs.to_claims_verifier_args(PROOF["request"], ONCHAIN_PROOF["presentation"])
+    with pytest.raises(ValueError, match="invalid presentation"):
+        proofs.to_claims_verifier_args(
+            ONCHAIN_PROOF["request"], {**ONCHAIN_PROOF["presentation"], "root": "0x12"}
+        )
+    with pytest.raises(ProofRequestError):
+        proofs.to_claims_verifier_args(
+            {**ONCHAIN_PROOF["request"], "nonce": "0x12"}, ONCHAIN_PROOF["presentation"]
+        )
+
+
+def test_gate_peek_leaves_the_proof_for_commit() -> None:
+    gate = vector_gate(PROOF["root_info"], GATE["now"])
+    headers = {"AGENT-PROOF": PROOF["agent_proof_header"]}
+    # A paywall in front of the resource: verify, answer 402, verify again with the payment.
+    first = gate.peek(headers)
+    second = gate.peek(headers)
+    assert isinstance(first, ProofVerified)
+    assert isinstance(second, ProofVerified)
+    assert second.nullifier == first.nullifier == PROOF["expected"]["nullifier"]
+    assert gate.commit(second) is True
+    assert gate.commit(first) is False  # used up meanwhile: a replay
+    replay = gate.peek(headers)
+    assert replay.kind == "proof-required"
+    assert replay.reason == "nonce_reused"
+    assert gate.check(headers).kind == "proof-required"
+    with pytest.raises(TypeError):
+        gate.commit(replay)  # type: ignore[arg-type]
+
+
+async def test_async_gate_peek_and_commit() -> None:
+    gate = AsyncProofGate(
+        scope=GATE["scope"],
+        key=GATE["key_utf8"],
+        require=GATE_REQUIREMENTS,
+        registry=GATE["registry"],
+        now=lambda: GATE["now"],
+        root_resolver=lambda _query: root_info(PROOF["root_info"]),
+    )
+    headers = {"AGENT-PROOF": PROOF["agent_proof_header"]}
+    peeked = await gate.peek(headers)
+    assert isinstance(peeked, ProofVerified)
+    assert (await gate.peek(headers)).kind == "verified"
+    assert await gate.commit(peeked) is True
+    assert await gate.commit(peeked) is False
+    refused = await gate.check(headers)
+    assert refused.kind == "proof-required"
+    assert refused.reason == "nonce_reused"
+    with pytest.raises(TypeError):
+        await gate.commit(refused)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("case", VECTORS["tampered"], ids=lambda c: c["name"])
