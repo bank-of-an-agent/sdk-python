@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from agentbank import _operations as ops
+from agentbank._async.proofs import AsyncProofTransport
 from agentbank._async.resources._base import AsyncAPIResource
 from agentbank._async.x402 import AsyncX402Transport
 from agentbank._base_client import RequestOptions
@@ -26,6 +27,7 @@ from agentbank.models import (
     X402SupportedResponse,
     X402VerifyResponse,
 )
+from agentbank.proofs import proof_secret_from_env
 from agentbank.x402 import (
     DEFAULT_MAX_AMOUNT_PER_REQUEST,
     X402Receipt,
@@ -195,11 +197,22 @@ class AsyncX402(AsyncAPIResource):
         allowed_domains: Collection[str] | None = None,
         on_payment: Callable[[X402Receipt], None] | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        proofs: bool | None = None,
+        proof_secret: str | None = None,
     ) -> AsyncX402Transport:
         """Build an x402-paying ``httpx`` transport bound to this client.
 
-        See :class:`agentbank.AsyncX402Transport` for the arguments.
+        See :class:`agentbank.AsyncX402Transport` for the arguments. With
+        ``proofs`` (default: when a proof secret is configured, ``proof_secret``
+        or ``AGENTBANK_PROOF_SECRET``), private-proof challenges (401
+        ``AGENT-PROOF-REQUIRED``) are answered too, before the payment, through an
+        :class:`agentbank.AsyncProofTransport` (prover from ``AGENTBANK_PROVER``;
+        pass your own as ``transport=bank.proofs.transport(...)`` for other options).
         """
+        if proofs is None:
+            proofs = proof_secret is not None or proof_secret_from_env() is not None
+        if proofs and not isinstance(transport, AsyncProofTransport):
+            transport = AsyncProofTransport(self._client, secret=proof_secret, transport=transport)
         return AsyncX402Transport(
             self._client,
             max_amount=max_amount,
@@ -223,10 +236,13 @@ class AsyncX402(AsyncAPIResource):
         allowed_domains: Collection[str] | None = None,
         on_payment: Callable[[X402Receipt], None] | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        proofs: bool | None = None,
+        proof_secret: str | None = None,
         **httpx_options: Any,
     ) -> httpx.AsyncClient:
         """An ``httpx.AsyncClient`` that pays 402 responses (up to ``max_amount`` each).
 
+        It also answers private-proof challenges when ``proofs`` (see :meth:`transport`).
         Extra keyword arguments (``timeout``, ``headers``, ...) go to ``httpx.AsyncClient``.
         """
         x402_transport = self.transport(
@@ -238,6 +254,8 @@ class AsyncX402(AsyncAPIResource):
             allowed_domains=allowed_domains,
             on_payment=on_payment,
             transport=transport,
+            proofs=proofs,
+            proof_secret=proof_secret,
         )
         return httpx.AsyncClient(transport=x402_transport, **httpx_options)
 
@@ -256,11 +274,15 @@ class AsyncX402(AsyncAPIResource):
         mandate_id: str | None = None,
         allowed_domains: Collection[str] | None = None,
         timeout: float | httpx.Timeout | None = 30.0,
+        proofs: bool | None = None,
+        proof_secret: str | None = None,
     ) -> httpx.Response:
         """Fetch one URL, paying a 402 challenge of at most ``max_amount`` USDC.
 
+        Answers a private-proof challenge first when ``proofs`` (see :meth:`transport`).
         Returns the (fully read) response; ``agentbank.x402.x402_receipt(response)``
-        tells what was paid.
+        tells what was paid and ``agentbank.proofs.proof_receipt(response)`` what was
+        proved.
         """
         async with self.client(
             max_amount=max_amount,
@@ -270,5 +292,7 @@ class AsyncX402(AsyncAPIResource):
             mandate_id=mandate_id,
             allowed_domains=allowed_domains,
             timeout=timeout,
+            proofs=proofs,
+            proof_secret=proof_secret,
         ) as http:
             return await http.request(method, url, headers=headers, content=content, json=json)

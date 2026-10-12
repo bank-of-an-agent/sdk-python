@@ -85,5 +85,6 @@ def test_resource_helpers_delegate() -> None:
 
 def test_event_types_and_retry_schedule() -> None:
     assert "payment.settled" in WEBHOOK_EVENT_TYPES
-    assert len(WEBHOOK_EVENT_TYPES) == 24
+    assert "proof_reservation.expired" in WEBHOOK_EVENT_TYPES
+    assert len(WEBHOOK_EVENT_TYPES) == 28
     assert WEBHOOK_RETRY_SCHEDULE_SECONDS[-1] == 72 * 3600

@@ -13,6 +13,7 @@ import httpx
 from agentbank import _operations as ops
 from agentbank._base_client import RequestOptions
 from agentbank._resource_helpers import compact
+from agentbank._sync.proofs import ProofTransport
 from agentbank._sync.resources._base import APIResource
 from agentbank._sync.x402 import X402Transport
 from agentbank.chains import USDC, chain_for_network
@@ -28,6 +29,7 @@ from agentbank.models import (
     X402SupportedResponse,
     X402VerifyResponse,
 )
+from agentbank.proofs import proof_secret_from_env
 from agentbank.x402 import (
     DEFAULT_MAX_AMOUNT_PER_REQUEST,
     X402Receipt,
@@ -193,11 +195,22 @@ class X402(APIResource):
         allowed_domains: Collection[str] | None = None,
         on_payment: Callable[[X402Receipt], None] | None = None,
         transport: httpx.BaseTransport | None = None,
+        proofs: bool | None = None,
+        proof_secret: str | None = None,
     ) -> X402Transport:
         """Build an x402-paying ``httpx`` transport bound to this client.
 
-        See :class:`agentbank.X402Transport` for the arguments.
+        See :class:`agentbank.X402Transport` for the arguments. With
+        ``proofs`` (default: when a proof secret is configured, ``proof_secret``
+        or ``AGENTBANK_PROOF_SECRET``), private-proof challenges (401
+        ``AGENT-PROOF-REQUIRED``) are answered too, before the payment, through an
+        :class:`agentbank.ProofTransport` (prover from ``AGENTBANK_PROVER``;
+        pass your own as ``transport=bank.proofs.transport(...)`` for other options).
         """
+        if proofs is None:
+            proofs = proof_secret is not None or proof_secret_from_env() is not None
+        if proofs and not isinstance(transport, ProofTransport):
+            transport = ProofTransport(self._client, secret=proof_secret, transport=transport)
         return X402Transport(
             self._client,
             max_amount=max_amount,
@@ -221,10 +234,13 @@ class X402(APIResource):
         allowed_domains: Collection[str] | None = None,
         on_payment: Callable[[X402Receipt], None] | None = None,
         transport: httpx.BaseTransport | None = None,
+        proofs: bool | None = None,
+        proof_secret: str | None = None,
         **httpx_options: Any,
     ) -> httpx.Client:
         """An ``httpx.Client`` that pays 402 responses (up to ``max_amount`` each).
 
+        It also answers private-proof challenges when ``proofs`` (see :meth:`transport`).
         Extra keyword arguments (``timeout``, ``headers``, ...) go to ``httpx.Client``.
         """
         x402_transport = self.transport(
@@ -236,6 +252,8 @@ class X402(APIResource):
             allowed_domains=allowed_domains,
             on_payment=on_payment,
             transport=transport,
+            proofs=proofs,
+            proof_secret=proof_secret,
         )
         return httpx.Client(transport=x402_transport, **httpx_options)
 
@@ -254,11 +272,15 @@ class X402(APIResource):
         mandate_id: str | None = None,
         allowed_domains: Collection[str] | None = None,
         timeout: float | httpx.Timeout | None = 30.0,
+        proofs: bool | None = None,
+        proof_secret: str | None = None,
     ) -> httpx.Response:
         """Fetch one URL, paying a 402 challenge of at most ``max_amount`` USDC.
 
+        Answers a private-proof challenge first when ``proofs`` (see :meth:`transport`).
         Returns the (fully read) response; ``agentbank.x402.x402_receipt(response)``
-        tells what was paid.
+        tells what was paid and ``agentbank.proofs.proof_receipt(response)`` what was
+        proved.
         """
         with self.client(
             max_amount=max_amount,
@@ -268,5 +290,7 @@ class X402(APIResource):
             mandate_id=mandate_id,
             allowed_domains=allowed_domains,
             timeout=timeout,
+            proofs=proofs,
+            proof_secret=proof_secret,
         ) as http:
             return http.request(method, url, headers=headers, content=content, json=json)

@@ -50,6 +50,8 @@ OwnerAction = Literal[
     "vault.withdraw",
     "owner.rotate",
     "spend_key.set",
+    "proofs.disclose",
+    "proofs.reservation.release",
 ]
 
 #: Every action an owner authorization can carry.

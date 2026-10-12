@@ -64,6 +64,8 @@ def test_owner_actions_match_the_typescript_list() -> None:
         "vault.withdraw",
         "owner.rotate",
         "spend_key.set",
+        "proofs.disclose",
+        "proofs.reservation.release",
     )
 
 

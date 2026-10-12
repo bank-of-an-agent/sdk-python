@@ -1424,6 +1424,208 @@ SANDBOX_FAUCET: Final = Operation(
     response_media_types=("application/json",),
 )
 
+GET_PROOF_CIRCUIT: Final = Operation(
+    operation_id="getProofCircuit",
+    method="GET",
+    path="/v1/proofs/circuit",
+    auth=("public",),
+    idempotent=False,
+    service="api",
+    success_status=200,
+    path_params=(),
+    query_params=(),
+    has_body=False,
+    response_media_types=("application/json",),
+)
+
+LIST_PROOF_ROOTS: Final = Operation(
+    operation_id="listProofRoots",
+    method="GET",
+    path="/v1/proofs/roots",
+    auth=("public",),
+    idempotent=False,
+    service="api",
+    success_status=200,
+    path_params=(),
+    query_params=(
+        "cursor",
+        "limit",
+        "status",
+    ),
+    has_body=False,
+    response_media_types=("application/json",),
+)
+
+GET_PROOF_ROOT: Final = Operation(
+    operation_id="getProofRoot",
+    method="GET",
+    path="/v1/proofs/roots/{root}",
+    auth=("public",),
+    idempotent=False,
+    service="api",
+    success_status=200,
+    path_params=("root",),
+    query_params=(),
+    has_body=False,
+    response_media_types=("application/json",),
+)
+
+VERIFY_PROOF: Final = Operation(
+    operation_id="verifyProof",
+    method="POST",
+    path="/v1/proofs/verify",
+    auth=("public",),
+    idempotent=False,
+    service="api",
+    success_status=200,
+    path_params=(),
+    query_params=(),
+    has_body=True,
+    response_media_types=("application/json",),
+)
+
+GET_PROOF_SETTINGS: Final = Operation(
+    operation_id="getProofSettings",
+    method="GET",
+    path="/v1/agents/{id}/proofs/settings",
+    auth=("principal",),
+    idempotent=False,
+    service="api",
+    success_status=200,
+    path_params=("id",),
+    query_params=(),
+    has_body=False,
+    response_media_types=("application/json",),
+)
+
+UPDATE_PROOF_SETTINGS: Final = Operation(
+    operation_id="updateProofSettings",
+    method="PUT",
+    path="/v1/agents/{id}/proofs/settings",
+    auth=("principal",),
+    idempotent=True,
+    service="api",
+    success_status=200,
+    path_params=("id",),
+    query_params=(),
+    has_body=True,
+    response_media_types=("application/json",),
+)
+
+GET_PROOF_IDENTITY: Final = Operation(
+    operation_id="getProofIdentity",
+    method="GET",
+    path="/v1/accounts/{id}/proofs/identity",
+    auth=(
+        "agent",
+        "principal",
+    ),
+    idempotent=False,
+    service="api",
+    success_status=200,
+    path_params=("id",),
+    query_params=(),
+    has_body=False,
+    response_media_types=("application/json",),
+)
+
+ENROLL_PROOF_IDENTITY: Final = Operation(
+    operation_id="enrollProofIdentity",
+    method="PUT",
+    path="/v1/accounts/{id}/proofs/identity",
+    auth=("agent",),
+    idempotent=True,
+    service="api",
+    success_status=200,
+    path_params=("id",),
+    query_params=(),
+    has_body=True,
+    response_media_types=("application/json",),
+)
+
+GET_PROOF_WITNESS: Final = Operation(
+    operation_id="getProofWitness",
+    method="GET",
+    path="/v1/accounts/{id}/proofs/witness",
+    auth=("agent",),
+    idempotent=False,
+    service="api",
+    success_status=200,
+    path_params=("id",),
+    query_params=(
+        "reservation_id",
+        "root",
+    ),
+    has_body=False,
+    response_media_types=("application/json",),
+)
+
+LIST_PROOF_RESERVATIONS: Final = Operation(
+    operation_id="listProofReservations",
+    method="GET",
+    path="/v1/accounts/{id}/proofs/reservations",
+    auth=(
+        "agent",
+        "principal",
+    ),
+    idempotent=False,
+    service="api",
+    success_status=200,
+    path_params=("id",),
+    query_params=(
+        "cursor",
+        "limit",
+        "status",
+    ),
+    has_body=False,
+    response_media_types=("application/json",),
+)
+
+CREATE_PROOF_RESERVATION: Final = Operation(
+    operation_id="createProofReservation",
+    method="POST",
+    path="/v1/accounts/{id}/proofs/reservations",
+    auth=("agent",),
+    idempotent=True,
+    service="api",
+    success_status=201,
+    path_params=("id",),
+    query_params=(),
+    has_body=True,
+    response_media_types=("application/json",),
+)
+
+GET_PROOF_RESERVATION: Final = Operation(
+    operation_id="getProofReservation",
+    method="GET",
+    path="/v1/proofs/reservations/{id}",
+    auth=(
+        "agent",
+        "principal",
+    ),
+    idempotent=False,
+    service="api",
+    success_status=200,
+    path_params=("id",),
+    query_params=(),
+    has_body=False,
+    response_media_types=("application/json",),
+)
+
+RELEASE_PROOF_RESERVATION: Final = Operation(
+    operation_id="releaseProofReservation",
+    method="POST",
+    path="/v1/proofs/reservations/{id}/release",
+    auth=("principal",),
+    idempotent=True,
+    service="api",
+    success_status=200,
+    path_params=("id",),
+    query_params=(),
+    has_body=True,
+    response_media_types=("application/json",),
+)
+
 GET_META: Final = Operation(
     operation_id="getMeta",
     method="GET",
@@ -1542,6 +1744,19 @@ OPERATIONS: Final[dict[str, Operation]] = {
     "prepareOwnerSwap": PREPARE_OWNER_SWAP,
     "listAutoTopUpRules": LIST_AUTO_TOP_UP_RULES,
     "sandboxFaucet": SANDBOX_FAUCET,
+    "getProofCircuit": GET_PROOF_CIRCUIT,
+    "listProofRoots": LIST_PROOF_ROOTS,
+    "getProofRoot": GET_PROOF_ROOT,
+    "verifyProof": VERIFY_PROOF,
+    "getProofSettings": GET_PROOF_SETTINGS,
+    "updateProofSettings": UPDATE_PROOF_SETTINGS,
+    "getProofIdentity": GET_PROOF_IDENTITY,
+    "enrollProofIdentity": ENROLL_PROOF_IDENTITY,
+    "getProofWitness": GET_PROOF_WITNESS,
+    "listProofReservations": LIST_PROOF_RESERVATIONS,
+    "createProofReservation": CREATE_PROOF_RESERVATION,
+    "getProofReservation": GET_PROOF_RESERVATION,
+    "releaseProofReservation": RELEASE_PROOF_RESERVATION,
     "getMeta": GET_META,
     "health": HEALTH,
 }

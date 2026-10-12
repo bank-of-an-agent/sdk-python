@@ -15,11 +15,13 @@ Testnet only (Base Sepolia). Quick tour::
 Everything is also available asynchronously via :class:`AsyncAgentBank`.
 """
 
-from agentbank import early_withdrawal, flows, models, owner_payloads, spend_key
+from agentbank import early_withdrawal, flows, models, owner_payloads, proofs, spend_key
 from agentbank._async.client import AsyncAgentBank
+from agentbank._async.proofs import AsyncProofTransport
 from agentbank._async.x402 import AsyncX402Transport
 from agentbank._base_client import RequestOptions
 from agentbank._sync.client import AgentBank
+from agentbank._sync.proofs import ProofTransport
 from agentbank._sync.x402 import X402Transport
 from agentbank._version import __version__
 from agentbank.canonical import canonical_json, canonical_keccak, canonical_sha256
@@ -53,6 +55,11 @@ from agentbank.errors import (
     PaymentFailedError,
     PermissionDeniedError,
     PolicyDeniedError,
+    ProofError,
+    ProofHeaderError,
+    ProofRefusedError,
+    ProofRequestError,
+    ProverError,
     RateLimitError,
     ServiceUnavailableError,
     SignatureVerificationError,
@@ -63,6 +70,15 @@ from agentbank.flows import GrantSessionResult, SetupAgentAccountResult, VaultWi
 from agentbank.http_signatures import content_digest, sign_request, verify_request
 from agentbank.keys import EthSigner, SessionKey, generate_session_key, generate_spend_key
 from agentbank.money import format_amount, money, parse_amount
+from agentbank.proofs import (
+    AsyncProofGate,
+    AsyncProver,
+    ProofGate,
+    Prover,
+    create_proof_request,
+    generate_proof_secret,
+    verify_presentation,
+)
 from agentbank.spend_key import sign_spend_key_permit, spend_key_permit_typed_data
 from agentbank.webhooks import WebhookEvent, construct_event, sign_webhook, verify_webhook
 from agentbank.x402 import X402Receipt, X402Settings, x402_receipt
@@ -76,6 +92,9 @@ __all__ = [
     "AgentBank",
     "AgentBankError",
     "AsyncAgentBank",
+    "AsyncProofGate",
+    "AsyncProofTransport",
+    "AsyncProver",
     "AsyncX402Transport",
     "AuthenticationError",
     "BadRequestError",
@@ -96,6 +115,14 @@ __all__ = [
     "PaymentFailedError",
     "PermissionDeniedError",
     "PolicyDeniedError",
+    "ProofError",
+    "ProofGate",
+    "ProofHeaderError",
+    "ProofRefusedError",
+    "ProofRequestError",
+    "ProofTransport",
+    "Prover",
+    "ProverError",
     "RateLimitError",
     "RequestOptions",
     "ServiceUnavailableError",
@@ -116,10 +143,12 @@ __all__ = [
     "canonical_sha256",
     "construct_event",
     "content_digest",
+    "create_proof_request",
     "early_withdrawal",
     "early_withdrawal_typed_data",
     "flows",
     "format_amount",
+    "generate_proof_secret",
     "generate_session_key",
     "generate_spend_key",
     "models",
@@ -128,6 +157,7 @@ __all__ = [
     "owner_authorize",
     "owner_payloads",
     "parse_amount",
+    "proofs",
     "sign_early_withdrawal",
     "sign_request",
     "sign_spend_key_permit",
@@ -135,6 +165,7 @@ __all__ = [
     "spend_key",
     "spend_key_permit_typed_data",
     "verify_owner_authorization",
+    "verify_presentation",
     "verify_request",
     "verify_webhook",
     "x402_receipt",

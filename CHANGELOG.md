@@ -7,6 +7,25 @@ versions may contain breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- Private proofs (`agentbank.proofs`, schema `agentbank.claims.v1`), byte-for-byte compatible
+  with `@agentbank/proofs` (shared vectors in `tests/proof_vectors.json`): scopes and tags,
+  requirement builders (`verified_company()`, `can_pay_per_tx()`, `reserved_for()`, ...),
+  `create_proof_request`, `request_hash`, `public_signals`, pure-Python Groth16
+  verification (`verify_groth16`, `verify_presentation`, `py_ecc`), the stateless HMAC-nonce
+  `ProofGate` / `AsyncProofGate` with an in-memory replay cache, and `Prover` / `AsyncProver`
+  around the `agentbank-prove` CLI (`AGENTBANK_PROVER`; the secret, `AGENTBANK_PROOF_SECRET`,
+  only goes to its stdin). The circuit's verification key and manifest ship in the package
+  and are checked against the manifest's SHA-256.
+- `bank.proofs`: circuit, roots, verify, settings (owner signature only when widening),
+  identity enrollment, witnesses, reservations (owner release), `prove()` (picks the matching
+  reservation), `root_resolver()`, `gate()` and a proof-answering `transport()` / `client()`.
+- `x402.client(proofs=...)` answers a proof challenge (401 `AGENT-PROOF-REQUIRED`) and then a
+  payment challenge (402) in one request, keeping the proof on the paid retry.
+- Owner actions `proofs.disclose` and `proofs.reservation.release`; webhook events
+  `proof_settings.updated` and `proof_reservation.{created,released,expired}`.
+
 ## [0.1.0] - Unreleased
 
 First release, built against Agent Bank API 0.1.0 (`openapi.json`, 91

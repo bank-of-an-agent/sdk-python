@@ -58,6 +58,8 @@ def _isolated_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "AGENTBANK_SESSION_KEY",
         "AGENTBANK_SPEND_KEY",
         "AGENTBANK_ACCOUNT_ID",
+        "AGENTBANK_PROOF_SECRET",
+        "AGENTBANK_PROVER",
     ):
         monkeypatch.delenv(name, raising=False)
 

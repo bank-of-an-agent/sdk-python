@@ -100,8 +100,25 @@ jobs:
           import pathlib
           import agentbank
           from agentbank import AgentBank, AsyncAgentBank, X402Transport, verify_webhook
+          from agentbank import (
+              AsyncProofGate,
+              AsyncProofTransport,
+              AsyncProver,
+              ProofError,
+              ProofGate,
+              ProofRefusedError,
+              ProofTransport,
+              Prover,
+              ProverError,
+              create_proof_request,
+              generate_proof_secret,
+              verify_presentation,
+          )
+          from agentbank.proofs import circuit_manifest, load_verification_key
           package = pathlib.Path(agentbank.__file__).parent
           assert (package / "py.typed").exists(), "py.typed missing from the wheel"
           assert (package / "_sync" / "client.py").exists(), "generated sync client missing"
+          assert (package / "proofs_data" / "verification_key.json").exists(), "proof key missing"
+          assert load_verification_key()["nPublic"] == len(circuit_manifest()["public_signals"])
           print("agentbank", agentbank.__version__, "imports cleanly")
           EOF

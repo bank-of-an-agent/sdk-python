@@ -2160,6 +2160,10 @@ class WebhookEndpoint(AgentBankModel):
             "session.revoked",
             "balance.low",
             "statement.ready",
+            "proof_settings.updated",
+            "proof_reservation.created",
+            "proof_reservation.released",
+            "proof_reservation.expired",
         ]
     ]
     status: Literal["enabled", "disabled"]
@@ -2199,6 +2203,10 @@ class WebhookEndpointWithSecret(AgentBankModel):
             "session.revoked",
             "balance.low",
             "statement.ready",
+            "proof_settings.updated",
+            "proof_reservation.created",
+            "proof_reservation.released",
+            "proof_reservation.expired",
         ]
     ]
     status: Literal["enabled", "disabled"]
@@ -2241,6 +2249,10 @@ class CreateWebhookEndpointRequest(AgentBankModel):
                 "session.revoked",
                 "balance.low",
                 "statement.ready",
+                "proof_settings.updated",
+                "proof_reservation.created",
+                "proof_reservation.released",
+                "proof_reservation.expired",
             ]
         ],
         Field(min_length=1),
@@ -2275,6 +2287,10 @@ class Event(AgentBankModel):
         "session.revoked",
         "balance.low",
         "statement.ready",
+        "proof_settings.updated",
+        "proof_reservation.created",
+        "proof_reservation.released",
+        "proof_reservation.expired",
     ]
     org_id: Annotated[str, Field(pattern="^org_[0-9A-HJKMNP-TV-Z]{26}$")]
     data: dict[str, Any]
@@ -2386,6 +2402,520 @@ class RevenueReport(AgentBankModel):
     """
     Decimal string in major units, e.g. "25.00". Never a JSON number.
     """
+
+
+class ProofBound(AgentBankModel):
+    """
+    Inclusive [min, max] bound on one attribute. Money attributes (per_tx_limit, per_day_limit, balance, reserved_amount, volume_settled) take decimal USDC strings ("5.00"); every other attribute takes base-10 integer strings (unix seconds for reserved_until and account_created_on). Equality is min = max.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    min: Annotated[str | None, Field(pattern="^(0|[1-9][0-9]{0,19})(\\.[0-9]{1,6})?$")] = None
+    """
+    Inclusive lower bound. Omitted: 0.
+    """
+    max: Annotated[str | None, Field(pattern="^(0|[1-9][0-9]{0,19})(\\.[0-9]{1,6})?$")] = None
+    """
+    Inclusive upper bound. Omitted: 2^64 - 1.
+    """
+
+
+class ProofRequest(AgentBankModel):
+    """
+    A verifier's proof request (sent base64 JSON in AGENT-PROOF-REQUIRED). request_hash = keccak256 of its canonical JSON.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    type: Literal["agentbank.proof_request.v1"]
+    scope: Annotated[str, Field(max_length=253, min_length=1)]
+    """
+    The verifier's identifier, normally its host name (at most 253 characters)
+    """
+    request_id: Annotated[str, Field(pattern="^[0-9a-f]{32}$")]
+    """
+    16 random bytes, lowercase hex
+    """
+    nonce: Annotated[str, Field(pattern="^0x[0-9a-f]{62}$")]
+    """
+    31-byte challenge bound into the proof. Stateless gates derive it as the first 31 bytes of HMAC-SHA256(gate key, canonical JSON of the request without nonce).
+    """
+    issued_at: Annotated[int, Field(ge=0, le=9007199254740991)]
+    """
+    Unix seconds
+    """
+    expires_at: Annotated[int, Field(gt=0, le=9007199254740991)]
+    """
+    Unix seconds
+    """
+    constraints: dict[str, ProofBound]
+    """
+    Bounds per attribute; omitted attributes are unconstrained.
+    """
+    max_root_age_seconds: Annotated[int, Field(gt=0, le=9007199254740991)]
+    """
+    Oldest snapshot accepted, in seconds before verification
+    """
+    min_anonymity_set: Annotated[int, Field(ge=1, le=9007199254740991)]
+    """
+    Fewest leaves the proof's root must have
+    """
+    chain_id: Annotated[int, Field(gt=0, le=9007199254740991)]
+    registry: Annotated[
+        str | None,
+        Field(
+            examples=["0x1111111111111111111111111111111111111111"],
+            pattern="^0x[a-fA-F0-9]{40}$",
+        ),
+    ]
+    """
+    AgentAttestationRegistry the root must be published in (null: the deployment's)
+    """
+
+
+PiAItem = TypeAliasType("PiAItem", Annotated[str, Field(pattern="^(0|[1-9][0-9]{0,76})$")])
+
+
+PiBItemItem = TypeAliasType("PiBItemItem", Annotated[str, Field(pattern="^(0|[1-9][0-9]{0,76})$")])
+
+
+PiBItem = TypeAliasType(
+    "PiBItem",
+    Annotated[tuple[PiBItemItem, PiBItemItem], Field(max_length=2, min_length=2)],
+)
+
+
+PiBItem1Item = TypeAliasType(
+    "PiBItem1Item", Annotated[str, Field(pattern="^(0|[1-9][0-9]{0,76})$")]
+)
+
+
+PiBItem1 = TypeAliasType(
+    "PiBItem1",
+    Annotated[tuple[PiBItem1Item, PiBItem1Item], Field(max_length=2, min_length=2)],
+)
+
+
+PiBItem2Item = TypeAliasType(
+    "PiBItem2Item", Annotated[str, Field(pattern="^(0|[1-9][0-9]{0,76})$")]
+)
+
+
+PiBItem2 = TypeAliasType(
+    "PiBItem2",
+    Annotated[tuple[PiBItem2Item, PiBItem2Item], Field(max_length=2, min_length=2)],
+)
+
+
+PiCItem = TypeAliasType("PiCItem", Annotated[str, Field(pattern="^(0|[1-9][0-9]{0,76})$")])
+
+
+class Groth16Proof(AgentBankModel):
+    """
+    A Groth16 proof on BN254 in snarkjs JSON form.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    pi_a: tuple[PiAItem, PiAItem, PiAItem]
+    pi_b: tuple[PiBItem, PiBItem1, PiBItem2]
+    pi_c: tuple[PiCItem, PiCItem, PiCItem]
+    protocol: Literal["groth16"]
+    curve: Literal["bn128"]
+
+
+class ProofPresentation(AgentBankModel):
+    """
+    An agent's answer to a proof request. Verifiers rebuild the public signals from their own request, never from the agent.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    type: Literal["agentbank.proof.v1"]
+    request_hash: Annotated[str, Field(pattern="^0x[a-fA-F0-9]{64}$")]
+    """
+    keccak256 of the request's canonical JSON
+    """
+    root: Annotated[str, Field(pattern="^0x[a-fA-F0-9]{64}$")]
+    """
+    The published tree root the proof is against
+    """
+    nullifier: Annotated[str, Field(pattern="^0x[a-fA-F0-9]{64}$")]
+    """
+    Poseidon(secret, scope): a per-verifier pseudonym, unlinkable across verifiers
+    """
+    proof: Groth16Proof
+
+
+Sha256AdditionalProperty = TypeAliasType(
+    "Sha256AdditionalProperty", Annotated[str, Field(pattern="^[0-9a-f]{64}$")]
+)
+
+
+class ProofCircuit(AgentBankModel):
+    """
+    The claims circuit, its verification key and where its roots are published.
+    """
+
+    object: Literal["proof_circuit"]
+    schema_: Annotated[Literal["agentbank.claims.v1"], Field(alias="schema")]
+    protocol: Literal["groth16"]
+    curve: Literal["bn128"]
+    tree_depth: Annotated[int, Field(gt=0, le=9007199254740991)]
+    attributes: list[
+        Literal[
+            "principal_verification",
+            "per_tx_limit",
+            "per_day_limit",
+            "balance",
+            "reserved_amount",
+            "reserved_until",
+            "reserved_for",
+            "account_created_on",
+            "payments_settled",
+            "volume_settled",
+            "escrows_completed",
+            "disputes_lost",
+            "counterparties",
+        ]
+    ]
+    disclosure_classes: dict[
+        str,
+        list[
+            Literal[
+                "principal_verification",
+                "per_tx_limit",
+                "per_day_limit",
+                "balance",
+                "reserved_amount",
+                "reserved_until",
+                "reserved_for",
+                "account_created_on",
+                "payments_settled",
+                "volume_settled",
+                "escrows_completed",
+                "disputes_lost",
+                "counterparties",
+            ]
+        ],
+    ]
+    """
+    The attributes each disclosure class covers
+    """
+    public_signals: list[str]
+    """
+    Public signal layout, in circuit order
+    """
+    constraints: Annotated[int, Field(gt=0, le=9007199254740991)]
+    verification_key: dict[str, Any]
+    """
+    snarkjs verification key
+    """
+    sha256: dict[str, Sha256AdditionalProperty]
+    """
+    SHA-256 of each circuit artifact, from the circuit manifest
+    """
+    chain_id: Annotated[int, Field(ge=-9007199254740991, le=9007199254740991)]
+    registry: Annotated[
+        str | None,
+        Field(
+            examples=["0x1111111111111111111111111111111111111111"],
+            pattern="^0x[a-fA-F0-9]{40}$",
+        ),
+    ]
+    """
+    AgentAttestationRegistry on this chain
+    """
+    verifier: Annotated[
+        str | None,
+        Field(
+            examples=["0x1111111111111111111111111111111111111111"],
+            pattern="^0x[a-fA-F0-9]{40}$",
+        ),
+    ]
+    """
+    AgentClaimsVerifier on this chain
+    """
+
+
+class ProofRoot(AgentBankModel):
+    """
+    A Merkle root of attested facts anchored on Base.
+    """
+
+    object: Literal["proof_root"]
+    root: Annotated[str, Field(pattern="^0x[a-fA-F0-9]{64}$")]
+    epoch: Annotated[str, Field(pattern="^(0|[1-9][0-9]{0,19})$")]
+    """
+    Strictly increasing snapshot number
+    """
+    snapshot_at: AwareDatetime
+    """
+    When the attested facts were read
+    """
+    published_at: AwareDatetime | None
+    """
+    Block time of publication
+    """
+    valid_until: AwareDatetime
+    """
+    Proofs against this root are refused after it
+    """
+    leaf_count: Annotated[int, Field(ge=0, le=9007199254740991)]
+    """
+    The anonymity set of proofs
+    """
+    status: Annotated[
+        Literal["publishing", "published", "revoked", "expired", "failed"],
+        Field(title="ProofRootStatus"),
+    ]
+    """
+    publishing → published → (revoked | expired), or failed.
+    """
+    tx_hash: Annotated[str | None, Field(pattern="^0x[a-fA-F0-9]{64}$")]
+    chain_id: Annotated[int, Field(ge=-9007199254740991, le=9007199254740991)]
+    registry: Annotated[
+        str | None,
+        Field(
+            examples=["0x1111111111111111111111111111111111111111"],
+            pattern="^0x[a-fA-F0-9]{40}$",
+        ),
+    ]
+    """
+    EVM address
+    """
+
+
+class ProofSettings(AgentBankModel):
+    """
+    What an agent may prove about itself. Disclosure is the owner's decision.
+    """
+
+    object: Literal["proof_settings"]
+    agent_id: Annotated[str, Field(pattern="^agt_[0-9A-HJKMNP-TV-Z]{26}$")]
+    enabled: bool
+    """
+    Whether the agent appears in the attested tree at all
+    """
+    disclose: list[
+        Literal["principal", "limits", "balance", "reservations", "account_age", "reputation"]
+    ]
+    """
+    Classes a proof may constrain
+    """
+    disclosure_mask: Annotated[int, Field(ge=0, le=8191)]
+    """
+    13-bit mask (bit i: attribute i may be constrained), hashed into the leaf
+    """
+    updated_at: AwareDatetime | None
+    """
+    Null until the owner first configures proofs
+    """
+
+
+class UpdateProofSettingsRequest(AgentBankModel):
+    enabled: bool
+    disclose: Annotated[
+        list[
+            Literal["principal", "limits", "balance", "reservations", "account_age", "reputation"]
+        ],
+        Field(max_length=6),
+    ]
+    owner_authorization: OwnerAuthorization | None = None
+    """
+    Required when the change widens disclosure (enables proofs or adds a class): action "proofs.disclose" over { agent_id, enabled, disclose (sorted) }. Narrowing needs only an API key and revokes older roots at once.
+    """
+
+
+class ProofIdentity(AgentBankModel):
+    """
+    The agent's enrolled identity commitment.
+    """
+
+    object: Literal["proof_identity"]
+    account_id: Annotated[str, Field(pattern="^acct_[0-9A-HJKMNP-TV-Z]{26}$")]
+    identity_commitment: Annotated[str, Field(pattern="^0x[a-fA-F0-9]{64}$")]
+    """
+    Poseidon(secret) as a 32-byte big-endian field element; the secret never leaves the agent
+    """
+    created_at: AwareDatetime
+    """
+    ISO 8601 timestamp
+    """
+    updated_at: AwareDatetime
+    """
+    ISO 8601 timestamp
+    """
+
+
+class EnrollProofIdentityRequest(AgentBankModel):
+    identity_commitment: Annotated[str, Field(pattern="^0x[a-fA-F0-9]{64}$")]
+    """
+    Poseidon(secret), a non-zero BN254 field element as 32-byte hex
+    """
+
+
+Sibling = TypeAliasType("Sibling", Annotated[str, Field(pattern="^(0|[1-9][0-9]{0,76})$")])
+
+
+AttributesAdditionalProperty = TypeAliasType(
+    "AttributesAdditionalProperty",
+    Annotated[str, Field(pattern="^(0|[1-9][0-9]{0,19})$")],
+)
+
+
+class ProofWitness(AgentBankModel):
+    """
+    Everything an agent needs, besides its secret, to prove against a published root: its leaf's attested values and Merkle path.
+    """
+
+    object: Literal["proof_witness"]
+    schema_: Annotated[Literal["agentbank.claims.v1"], Field(alias="schema")]
+    account_id: Annotated[str, Field(pattern="^acct_[0-9A-HJKMNP-TV-Z]{26}$")]
+    chain_id: Annotated[int, Field(ge=-9007199254740991, le=9007199254740991)]
+    registry: Annotated[
+        str | None,
+        Field(
+            examples=["0x1111111111111111111111111111111111111111"],
+            pattern="^0x[a-fA-F0-9]{40}$",
+        ),
+    ]
+    """
+    EVM address
+    """
+    root: Annotated[str, Field(pattern="^0x[a-fA-F0-9]{64}$")]
+    epoch: Annotated[str, Field(pattern="^(0|[1-9][0-9]{0,19})$")]
+    snapshot_at: AwareDatetime
+    """
+    ISO 8601 timestamp
+    """
+    valid_until: AwareDatetime
+    """
+    ISO 8601 timestamp
+    """
+    leaf_count: Annotated[int, Field(gt=0, le=9007199254740991)]
+    leaf_index: Annotated[int, Field(ge=0, le=9007199254740991)]
+    siblings: Annotated[list[Sibling], Field(max_length=20, min_length=20)]
+    """
+    Merkle path, leaf level first
+    """
+    path_bits: Annotated[list[Literal[0, 1]], Field(max_length=20, min_length=20)]
+    """
+    1 when the node at that level is a right child
+    """
+    attributes: dict[str, AttributesAdditionalProperty]
+    """
+    Attested values as base-10 integers in raw units (USDC minor units, unix seconds)
+    """
+    disclosure_mask: Annotated[int, Field(ge=0, le=8191)]
+    reservation_id: Annotated[str | None, Field(pattern="^prv_[0-9A-HJKMNP-TV-Z]{26}$")]
+    """
+    The reservation this leaf represents; null for the base leaf
+    """
+
+
+class ProofReservation(AgentBankModel):
+    """
+    Funds held for one verifier so the agent can prove '$X is reserved for you until T'. The agent cannot spend them through Agent Bank or cancel the reservation; only the owner can release it early.
+    """
+
+    id: Annotated[str, Field(pattern="^prv_[0-9A-HJKMNP-TV-Z]{26}$")]
+    object: Literal["proof_reservation"]
+    account_id: Annotated[str, Field(pattern="^acct_[0-9A-HJKMNP-TV-Z]{26}$")]
+    agent_id: Annotated[str, Field(pattern="^agt_[0-9A-HJKMNP-TV-Z]{26}$")]
+    amount: Money
+    scope_tag: Annotated[str, Field(pattern="^(0|[1-9][0-9]{0,19})$")]
+    """
+    Low 64 bits of the verifier's scope (reserved_for)
+    """
+    expires_at: AwareDatetime
+    """
+    ISO 8601 timestamp
+    """
+    status: Literal["pending", "active", "released", "expired"]
+    """
+    pending until a root includes it, active while provable, then released or expired
+    """
+    hold_id: Annotated[str, Field(pattern="^hld_[0-9A-HJKMNP-TV-Z]{26}$")]
+    created_at: AwareDatetime
+    """
+    ISO 8601 timestamp
+    """
+    released_at: AwareDatetime | None
+    """
+    ISO 8601 timestamp
+    """
+    included_in_epoch: Annotated[str | None, Field(pattern="^(0|[1-9][0-9]{0,19})$")]
+    """
+    First root epoch whose tree includes it
+    """
+
+
+class CreateProofReservationRequest(AgentBankModel):
+    amount: Money
+    scope: Annotated[str | None, Field(max_length=253, min_length=1)] = None
+    """
+    The verifier's scope identifier
+    """
+    scope_tag: Annotated[str | None, Field(pattern="^[1-9][0-9]{0,19}$")] = None
+    """
+    Or just the verifier's 64-bit scope tag, as a base-10 string
+    """
+    expires_at: AwareDatetime
+    """
+    When the hold is released; at most 7 days ahead
+    """
+
+
+class ReleaseProofReservationRequest(AgentBankModel):
+    owner_authorization: OwnerAuthorization
+    """
+    OwnerAuthorization with action "proofs.reservation.release" over { reservation_id }
+    """
+
+
+class VerifyProofRequest(AgentBankModel):
+    request: ProofRequest
+    presentation: ProofPresentation
+
+
+class VerifyProofResponse(AgentBankModel):
+    """
+    Result of checking a presentation against a request (expiry, request hash, root, proof). Nonce freshness is the verifier's own concern.
+    """
+
+    object: Literal["proof_verification"]
+    valid: bool
+    reason: (
+        Literal[
+            "malformed",
+            "request_expired",
+            "nonce_invalid",
+            "nonce_reused",
+            "request_hash_mismatch",
+            "unknown_root",
+            "root_revoked",
+            "root_expired",
+            "root_too_old",
+            "anonymity_set_too_small",
+            "invalid_proof",
+        ]
+        | None
+    )
+    """
+    Why the presentation was refused
+    """
+    nullifier: Annotated[str | None, Field(pattern="^0x[a-fA-F0-9]{64}$")]
+    """
+    The agent's pseudonym for this scope, when valid
+    """
+    root: Annotated[str | None, Field(pattern="^0x[a-fA-F0-9]{64}$")]
+    root_status: Literal["publishing", "published", "revoked", "expired", "failed"] | None
 
 
 class MetaUsdc(AgentBankModel):
@@ -2613,6 +3143,16 @@ GetSweepRuleResponse = TypeAliasType(
 )
 
 
+class ListProofRootsResponse(AgentBankModel):
+    data: list[ProofRoot]
+    next_cursor: str | None
+
+
+class ListProofReservationsResponse(AgentBankModel):
+    data: list[ProofReservation]
+    next_cursor: str | None
+
+
 class HealthResponse(AgentBankModel):
     status: Literal["ok", "degraded"]
     checks: dict[str, str]
@@ -2634,6 +3174,7 @@ __all__ = [
     "ApprovalDecision",
     "ApprovalThreshold",
     "AttachSpendKeyRequest",
+    "AttributesAdditionalProperty",
     "AutoSave",
     "AutoTopUpRule",
     "Balances",
@@ -2655,6 +3196,7 @@ __all__ = [
     "CreateOrgResponse",
     "CreatePaymentRequest",
     "CreatePaymentRequestRequest",
+    "CreateProofReservationRequest",
     "CreateSessionRequest",
     "CreateStreamRequest",
     "CreateTreasuryAccountRequest",
@@ -2664,6 +3206,7 @@ __all__ = [
     "DisputeEscrowRequest",
     "Eip3009Authorization",
     "Eip712Domain",
+    "EnrollProofIdentityRequest",
     "Erc8004Id",
     "Escrow",
     "EscrowPayee",
@@ -2679,6 +3222,7 @@ __all__ = [
     "FundEligibility",
     "GetAutoTopUpResponse",
     "GetSweepRuleResponse",
+    "Groth16Proof",
     "HealthResponse",
     "Hostname",
     "IncomeSplit",
@@ -2700,6 +3244,8 @@ __all__ = [
     "ListOwnerOperationsResponse",
     "ListPaymentsResponse",
     "ListPlansResponse",
+    "ListProofReservationsResponse",
+    "ListProofRootsResponse",
     "ListSessionsResponse",
     "ListStreamsResponse",
     "ListVaultsResponse",
@@ -2722,6 +3268,14 @@ __all__ = [
     "PaymentDestination",
     "PaymentIntent",
     "PaymentRequest",
+    "PiAItem",
+    "PiBItem",
+    "PiBItem1",
+    "PiBItem1Item",
+    "PiBItem2",
+    "PiBItem2Item",
+    "PiBItemItem",
+    "PiCItem",
     "Plan",
     "PolicyCheckRequest",
     "PolicyCounterparties",
@@ -2732,11 +3286,21 @@ __all__ = [
     "PolicyVersion",
     "PrepareOwnerSwapRequest",
     "Problem",
+    "ProofBound",
+    "ProofCircuit",
+    "ProofIdentity",
+    "ProofPresentation",
+    "ProofRequest",
+    "ProofReservation",
+    "ProofRoot",
+    "ProofSettings",
+    "ProofWitness",
     "PutAutoTopUpRequest",
     "PutPolicyRequest",
     "PutSweepRuleRequest",
     "RecurrenceConstraint",
     "RegisterX402PayeeRequest",
+    "ReleaseProofReservationRequest",
     "RevenueByStreamAdditionalProperty",
     "RevenueReport",
     "RotateOwnerRequest",
@@ -2749,6 +3313,8 @@ __all__ = [
     "Session",
     "SessionScope",
     "SetTreasuryRequest",
+    "Sha256AdditionalProperty",
+    "Sibling",
     "SigningRequest",
     "SpendKeyPermit",
     "Statement",
@@ -2761,9 +3327,12 @@ __all__ = [
     "SweepRule",
     "TimeWindow",
     "UnfreezeRequest",
+    "UpdateProofSettingsRequest",
     "Vault",
     "VaultBalance",
     "VaultTransferRequest",
+    "VerifyProofRequest",
+    "VerifyProofResponse",
     "VolumeByKindAdditionalProperty",
     "WebhookEndpoint",
     "WebhookEndpointWithSecret",

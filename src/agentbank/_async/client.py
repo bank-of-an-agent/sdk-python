@@ -31,6 +31,7 @@ from agentbank._async.resources.payments import (
     AsyncPayments,
 )
 from agentbank._async.resources.policies import AsyncPolicies
+from agentbank._async.resources.proofs import AsyncProofs
 from agentbank._async.resources.sandbox import AsyncSandbox
 from agentbank._async.resources.sessions import AsyncSessions
 from agentbank._async.resources.streams import AsyncStreams
@@ -145,6 +146,7 @@ class AsyncAgentBank:
     webhooks: AsyncWebhooks
     billing: AsyncBilling
     sandbox: AsyncSandbox
+    proofs: AsyncProofs
 
     def __init__(
         self,
@@ -201,6 +203,7 @@ class AsyncAgentBank:
         self.webhooks = AsyncWebhooks(self)
         self.billing = AsyncBilling(self)
         self.sandbox = AsyncSandbox(self)
+        self.proofs = AsyncProofs(self)
 
     # ------------------------------------------------------------------ properties
 

@@ -14,6 +14,7 @@ from agentbank.chains import chain_for_network
 from agentbank.errors import ConfigurationError, X402Error
 from agentbank.keys import EthSigner, SessionKey, SignerLike, to_signer
 from agentbank.money import coerce_money, to_minor
+from agentbank.proofs import PROOF_HEADER, PROOF_RECEIPT_EXTENSION, proof_receipt
 from agentbank.x402 import (
     DEFAULT_MAX_AMOUNT_PER_REQUEST,
     PAYMENT_SIGNATURE_HEADER,
@@ -45,6 +46,10 @@ class X402Transport(httpx.BaseTransport):
 
     Each paid response carries an :class:`agentbank.x402.X402Receipt`
     (see :func:`agentbank.x402.x402_receipt`).
+
+    Over a proof transport (``bank.x402.client(proofs=True)``), a resource that
+    asks for a private proof (401) and then a payment (402) is answered in one
+    call: the paid retry carries the ``AGENT-PROOF`` header that was sent.
 
     Args:
         bank: An agent-authenticated client (session key) used for ``POST /v1/x402/pay``.
@@ -121,6 +126,7 @@ class X402Transport(httpx.BaseTransport):
         finally:
             response.close()
 
+        proof = proof_receipt(response)
         challenge = parse_payment_required(response.headers, response.content)
         settings = self._bank.x402.settings(self._network)
         selected = select_requirement(
@@ -147,6 +153,8 @@ class X402Transport(httpx.BaseTransport):
             extensions=dict(request.extensions),
         )
         paid_request.headers[header.name] = header.value
+        if proof is not None:
+            paid_request.headers[PROOF_HEADER] = proof.header
         paid = self._transport.handle_request(paid_request)
         settlement = decode_payment_response(paid.headers)
         if paid.status_code == 402:
@@ -168,6 +176,8 @@ class X402Transport(httpx.BaseTransport):
             settlement=settlement,
         )
         paid.extensions[RECEIPT_EXTENSION] = receipt
+        if proof is not None:
+            paid.extensions.setdefault(PROOF_RECEIPT_EXTENSION, proof)
         if self._on_payment is not None:
             self._on_payment(receipt)
         return paid

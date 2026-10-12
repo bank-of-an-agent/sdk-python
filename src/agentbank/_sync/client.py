@@ -45,6 +45,7 @@ from agentbank._sync.resources.payments import (
     Payments,
 )
 from agentbank._sync.resources.policies import Policies
+from agentbank._sync.resources.proofs import Proofs
 from agentbank._sync.resources.sandbox import Sandbox
 from agentbank._sync.resources.sessions import Sessions
 from agentbank._sync.resources.streams import Streams
@@ -146,6 +147,7 @@ class AgentBank:
     webhooks: Webhooks
     billing: Billing
     sandbox: Sandbox
+    proofs: Proofs
 
     def __init__(
         self,
@@ -202,6 +204,7 @@ class AgentBank:
         self.webhooks = Webhooks(self)
         self.billing = Billing(self)
         self.sandbox = Sandbox(self)
+        self.proofs = Proofs(self)
 
     # ------------------------------------------------------------------ properties
 

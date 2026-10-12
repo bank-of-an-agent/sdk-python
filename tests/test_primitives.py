@@ -161,7 +161,7 @@ def test_parse_and_format_amounts(text: str, minor: int) -> None:
 
 @pytest.mark.parametrize(
     "bad",
-    ["", "01", "1.", ".5", "1e3", "-1", " 1", "1.0000001", "٣", str(2**63)],
+    ["", "01", "1.", ".5", "1e3", "-1", " 1", "1\n", "5.00\n", "1.0000001", "٣", str(2**63)],
 )
 def test_parse_amount_rejects_malformed(bad: str) -> None:
     with pytest.raises(AgentBankError) as excinfo:

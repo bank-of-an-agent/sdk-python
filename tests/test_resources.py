@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Literal
 
 import httpx
@@ -43,6 +45,11 @@ STR_ID = id_for("str")
 APR_ID = id_for("apr")
 VLT_ID = id_for("vlt")
 WHE_ID = id_for("whe")
+PRV_ID = id_for("prv")
+ROOT = "0x" + "0d" * 32
+PROOF_VECTOR = json.loads((Path(__file__).parent / "proof_vectors.json").read_text("utf-8"))[
+    "proof"
+]
 SIGNATURE = "0x" + "11" * 65
 PERMIT = {"value": "1000000", "deadline": "4000000000", "nonce": "0", "signature": SIGNATURE}
 AUTH = {"signer": OWNER_ADDRESS, "signature": SIGNATURE, "issued_at": 1, "expires_at": 600}
@@ -359,6 +366,49 @@ CASES: list[Case] = [
         lambda c: c.sandbox.faucet(amount="10.00", address=SPEND_ADDRESS),
     ),
     Case("getMeta", "principal", lambda c: c.meta()),
+    # private proofs
+    Case("getProofCircuit", "principal", lambda c: c.proofs.circuit()),
+    Case("listProofRoots", "principal", lambda c: c.proofs.roots(status="published", limit=5)),
+    Case("getProofRoot", "principal", lambda c: c.proofs.root(ROOT), ROOT),
+    Case(
+        "verifyProof",
+        "principal",
+        lambda c: c.proofs.verify(PROOF_VECTOR["request"], PROOF_VECTOR["presentation"]),
+    ),
+    Case("getProofSettings", "principal", lambda c: c.proofs.settings(AGENT_ID), AGENT_ID),
+    Case(
+        "updateProofSettings",
+        "principal",
+        lambda c: c.proofs.update_settings(AGENT_ID, enabled=False, disclose=[]),
+        AGENT_ID,
+    ),
+    Case("enrollProofIdentity", "agent", lambda c: c.proofs.enroll(ROOT), ACCOUNT_ID),
+    Case("getProofIdentity", "agent", lambda c: c.proofs.identity(), ACCOUNT_ID),
+    Case(
+        "getProofWitness",
+        "agent",
+        lambda c: c.proofs.witness(reservation_id=PRV_ID, root=ROOT),
+        ACCOUNT_ID,
+    ),
+    Case(
+        "createProofReservation",
+        "agent",
+        lambda c: c.proofs.reserve("5.00", scope="api.seller.example", expires_at=EXPIRES),
+        ACCOUNT_ID,
+    ),
+    Case(
+        "listProofReservations",
+        "agent",
+        lambda c: c.proofs.reservations(status="active"),
+        ACCOUNT_ID,
+    ),
+    Case("getProofReservation", "agent", lambda c: c.proofs.reservation(PRV_ID), PRV_ID),
+    Case(
+        "releaseProofReservation",
+        "principal",
+        lambda c: c.proofs.release_reservation(PRV_ID, owner_authorization=AUTH),
+        PRV_ID,
+    ),
 ]
 
 #: Operations deliberately without a typed method (reachable through ``client.call``).
@@ -367,7 +417,7 @@ UNWRAPPED = {"getRevenueReport"}
 
 def _expected_path(case: Case) -> str:
     path = OPERATIONS[case.operation_id].path
-    return path.replace("{id}", case.path_id) if case.path_id else path
+    return re.sub(r"\{[a-z_]+\}", case.path_id, path) if case.path_id else path
 
 
 def _mock(router: respx.MockRouter, case: Case) -> respx.Route:
@@ -506,6 +556,14 @@ ITERATORS: list[tuple[str, str, Kind, Callable[[Any], Any], str | None]] = [
         "principal",
         lambda c: c.treasury.list_auto_topup_rules_all(),
         None,
+    ),
+    ("listProofRoots", "ListProofRootsResponse", "principal", lambda c: c.proofs.roots_all(), None),
+    (
+        "listProofReservations",
+        "ListProofReservationsResponse",
+        "agent",
+        lambda c: c.proofs.reservations_all(),
+        ACCOUNT_ID,
     ),
 ]
 

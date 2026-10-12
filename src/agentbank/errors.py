@@ -44,6 +44,11 @@ __all__ = [
     "PaymentFailedError",
     "PermissionDeniedError",
     "PolicyDeniedError",
+    "ProofError",
+    "ProofHeaderError",
+    "ProofRefusedError",
+    "ProofRequestError",
+    "ProverError",
     "RateLimitError",
     "ServiceUnavailableError",
     "SignatureVerificationError",
@@ -375,6 +380,130 @@ class X402Error(AgentBankError):
         self.reason = reason
         self.payment = payment
         self.settlement = dict(settlement) if settlement is not None else None
+
+
+#: Catalog code of each private-proof failure reason.
+PROOF_REASON_CODES: Mapping[str, str] = {
+    "invalid_request": "invalid_request",
+    "invalid_header": "invalid_request",
+    "invalid_input": "invalid_request",
+    "scope_not_allowed": "forbidden",
+    "unsatisfiable": "proof_refused",
+    "undisclosed": "proof_refused",
+    "witness_mismatch": "proof_refused",
+    "chain_mismatch": "proof_refused",
+    "reservation_required": "proof_refused",
+    "reservation_pending": "proof_refused",
+    "secret_missing": "configuration_error",
+    "prover_not_configured": "configuration_error",
+    "prover_failed": "prover_error",
+    "prover_timeout": "prover_error",
+    "proof_rejected": "proof_rejected",
+}
+
+
+class ProofError(AgentBankError):
+    """A private-proof operation failed client-side (see :mod:`agentbank.proofs`).
+
+    Attributes:
+        reason: Machine-readable reason (``.code`` is the matching code):
+            ``invalid_request`` (a malformed proof request or bound),
+            ``invalid_header`` (an undecodable ``AGENT-PROOF*`` header),
+            ``invalid_input`` (the prover rejected its input),
+            ``scope_not_allowed`` (a verifier asked for a proof for another scope),
+            ``unsatisfiable``, ``undisclosed``, ``witness_mismatch``, ``chain_mismatch``,
+            ``reservation_required``, ``reservation_pending``
+            (refusals, :class:`ProofRefusedError`),
+            ``secret_missing``, ``prover_not_configured``, ``prover_failed``,
+            ``prover_timeout`` (:class:`ProverError`), and ``proof_rejected``
+            (the verifier refused the presentation).
+        response: The verifier's HTTP response, for ``proof_rejected``.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        detail: str,
+        *,
+        extensions: Mapping[str, Any] | None = None,
+        response: httpx.Response | None = None,
+    ) -> None:
+        super().__init__(
+            PROOF_REASON_CODES.get(reason, "proof_error"),
+            detail,
+            extensions={"reason": reason, **(extensions or {})},
+            response=response,
+        )
+        self.reason = reason
+
+
+class ProofRequestError(ProofError):
+    """A proof request, or one of its bounds, is invalid (reason ``invalid_request``).
+
+    Verifiers report such requests as ``malformed``.
+
+    Attributes:
+        attribute: The attribute whose bound is invalid, when there is one.
+    """
+
+    def __init__(self, detail: str, *, attribute: str | None = None) -> None:
+        super().__init__("invalid_request", detail)
+        self.attribute = attribute
+
+
+class ProofHeaderError(ProofError):
+    """An ``AGENT-PROOF*`` header is not base64 JSON of the expected shape."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__("invalid_header", detail)
+
+
+class ProofRefusedError(ProofError):
+    """The agent cannot (or must not) prove this request with its attested facts.
+
+    Raised before any proving starts. Reasons: ``unsatisfiable`` (attested values
+    lie outside the requested bounds), ``undisclosed`` (the request constrains
+    attributes the owner did not disclose), ``witness_mismatch`` (the secret and
+    the witness do not hash to the root: wrong secret or a stale witness),
+    ``chain_mismatch`` (the witness is for another chain or registry than the
+    request) ``reservation_required`` (the request needs funds reserved for the verifier
+    and no active reservation matches) and ``reservation_pending`` (one matches but
+    is not in a published root yet).
+
+    Attributes:
+        attributes: Attributes whose attested values are outside the bounds.
+        undisclosed_classes: Disclosure classes the request constrains that the
+            owner did not disclose.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        detail: str,
+        *,
+        attributes: tuple[str, ...] = (),
+        undisclosed_classes: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(
+            reason,
+            detail,
+            extensions={
+                "attributes": list(attributes),
+                "undisclosed_classes": list(undisclosed_classes),
+            },
+        )
+        self.attributes = attributes
+        self.undisclosed_classes = undisclosed_classes
+
+
+class ProverError(ProofError):
+    """The external prover (``AGENTBANK_PROVER``) is missing, failed or timed out.
+
+    Reasons: ``secret_missing`` (no proof secret: pass ``secret=`` or set
+    ``AGENTBANK_PROOF_SECRET``), ``prover_not_configured`` (no prover command:
+    set ``AGENTBANK_PROVER``, e.g. ``node .../agentbank-prove.mjs``),
+    ``prover_failed``, ``prover_timeout`` and ``invalid_input``.
+    """
 
 
 _CODE_CLASSES: dict[str, type[AgentBankError]] = {

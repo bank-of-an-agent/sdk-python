@@ -63,7 +63,7 @@ def parse_amount(value: str, decimals: int = USDC_DECIMALS) -> int:
     _check_decimals(decimals)
     if not isinstance(value, str):
         raise AgentBankError("invalid_amount", "Amounts must be decimal strings")
-    match = _DECIMAL_RE.match(value)
+    match = _DECIMAL_RE.fullmatch(value)
     if match is None or not value.isascii():
         raise AgentBankError("invalid_amount", f'"{value}" is not a valid decimal amount')
     whole, fraction = match.group(1), match.group(2) or ""

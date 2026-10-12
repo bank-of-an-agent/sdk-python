@@ -72,6 +72,10 @@ WebhookEventType = Literal[
     "session.revoked",
     "balance.low",
     "statement.ready",
+    "proof_settings.updated",
+    "proof_reservation.created",
+    "proof_reservation.released",
+    "proof_reservation.expired",
 ]
 
 #: Every webhook event type.

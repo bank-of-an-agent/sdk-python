@@ -23,6 +23,8 @@ keywords = [
   "http-message-signatures",
   "eip-712",
   "eip-3009",
+  "zero-knowledge",
+  "groth16",
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -45,6 +47,7 @@ dependencies = [
   "pydantic>=2.7,<3",
   "eth-account>=0.13",
   "eth-utils>=5",
+  "py-ecc>=7,<9",
   "typing-extensions>=4.10",
 ]
 

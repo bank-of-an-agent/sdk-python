@@ -33,7 +33,7 @@ authorization signed elsewhere (for example on a hardware wallet) over
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
@@ -51,6 +51,8 @@ __all__ = [
     "org_unfreeze",
     "owner_rotate",
     "policy_loosen",
+    "proof_reservation_release",
+    "proofs_disclose",
     "session_grant",
     "spend_key_set",
     "sweep_set",
@@ -211,4 +213,33 @@ def spend_key_set(account_id: str, spend_key_address: str) -> OwnerActionPayload
         action="spend_key.set",
         subject=account_id,
         payload={"account_id": account_id, "spend_key_address": spend_key_address},
+    )
+
+
+def proofs_disclose(agent_id: str, *, enabled: bool, disclose: Iterable[str]) -> OwnerActionPayload:
+    """``PUT /v1/agents/{id}/proofs/settings`` when widening disclosure.
+
+    Subject = agent id; payload ``{agent_id, enabled, disclose}`` with ``disclose``
+    deduplicated and sorted (as in ``@agentbank/core``), so signers and the API
+    hash the same JSON whatever order the classes were listed in. Needed when the
+    change enables proofs or adds a disclosure class; narrowing needs no owner
+    signature.
+    """
+    return OwnerActionPayload(
+        action="proofs.disclose",
+        subject=agent_id,
+        payload={"agent_id": agent_id, "enabled": enabled, "disclose": sorted(set(disclose))},
+    )
+
+
+def proof_reservation_release(reservation_id: str) -> OwnerActionPayload:
+    """``POST /v1/proofs/reservations/{id}/release``: payload ``{reservation_id}``.
+
+    The owner releases a proof-of-funds reservation before it expires (the agent
+    cannot); every root containing it is revoked.
+    """
+    return OwnerActionPayload(
+        action="proofs.reservation.release",
+        subject=reservation_id,
+        payload={"reservation_id": reservation_id},
     )
