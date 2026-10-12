@@ -50,11 +50,11 @@ from agentbank._base_client import (
 )
 from agentbank._resource_helpers import require_session_for
 from agentbank._spec import Operation
-from agentbank.chains import DEFAULT_CHAIN_ID, assert_testnet
+from agentbank.chains import assert_testnet
 from agentbank.errors import APIConnectionError, APITimeoutError, error_from_response
 from agentbank.http_signatures import DEFAULT_SIGNATURE_LIFETIME_SECONDS
 from agentbank.keys import SessionKey, SignerLike, personal_sign_hash
-from agentbank.models import HealthResponse, Payment, PaymentDestination, SigningRequest
+from agentbank.models import HealthResponse, Meta, Payment, PaymentDestination, SigningRequest
 from agentbank.money import MoneyInput
 
 __all__ = ["AsyncAgentBank"]
@@ -88,8 +88,9 @@ class AsyncAgentBank:
         account_id: Default account for agent operations (payments, balances, ...).
         base_url: API base URL (default ``AGENTBANK_BASE_URL`` or ``http://localhost:8080``).
         facilitator_url: x402 facilitator base URL (default: ``base_url``).
-        chain_id: Chain for owner authorizations (default Base Sepolia, 84532).
-            Mainnet chain ids are refused.
+        chain_id: EIP-712 chain id for owner authorizations. Default: the
+            deployment's ``owner_authorization_chain_id`` from ``GET /v1/meta``
+            (fetched once and cached). Mainnet chain ids are refused.
         timeout: Request timeout in seconds or an ``httpx.Timeout`` (default 30 s).
         max_retries: Retries on network errors, 429 and 5xx (default 2).
         signature_lifetime_seconds: Lifetime of request signatures (max 300).
@@ -129,7 +130,7 @@ class AsyncAgentBank:
         account_id: str | None = None,
         base_url: str | None = None,
         facilitator_url: str | None = None,
-        chain_id: int = DEFAULT_CHAIN_ID,
+        chain_id: int | None = None,
         timeout: float | httpx.Timeout | None = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
         signature_lifetime_seconds: int = DEFAULT_SIGNATURE_LIFETIME_SECONDS,
@@ -150,6 +151,7 @@ class AsyncAgentBank:
             signature_lifetime_seconds=signature_lifetime_seconds,
             default_headers=default_headers,
         )
+        self._meta: Meta | None = None
         self._owns_http_client = http_client is None
         self._http = http_client or httpx.AsyncClient(timeout=self._config.timeout)
         self.orgs = AsyncOrgs(self)
@@ -191,8 +193,8 @@ class AsyncAgentBank:
         return self._config.session_id
 
     @property
-    def chain_id(self) -> int:
-        """Chain id for owner authorizations (a testnet)."""
+    def chain_id(self) -> int | None:
+        """The configured owner-authorization chain id (``None``: from ``GET /v1/meta``)."""
         return self._config.chain_id
 
     def __repr__(self) -> str:
@@ -238,12 +240,13 @@ class AsyncAgentBank:
         payment_request_id: str | None = None,
         metadata: Mapping[str, str] | None = None,
         idempotency_key: str | None = None,
+        wait_for_approval: bool = False,
         wait_for_settlement: bool = False,
         timeout: float = DEFAULT_SETTLEMENT_TIMEOUT,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         request_options: RequestOptions | None = None,
     ) -> Payment:
-        """Pay in one call (create, sign with the session key, submit).
+        """Pay in one call (create, check, sign with the session key, submit).
 
         Shorthand for ``payments.pay`` so an agent-authenticated client reads
         naturally::
@@ -262,6 +265,7 @@ class AsyncAgentBank:
             payment_request_id=payment_request_id,
             metadata=metadata,
             idempotency_key=idempotency_key,
+            wait_for_approval=wait_for_approval,
             wait_for_settlement=wait_for_settlement,
             timeout=timeout,
             poll_interval=poll_interval,
@@ -273,6 +277,35 @@ class AsyncAgentBank:
         return await self._request_model(
             ops.HEALTH, HealthResponse, request_options=request_options
         )
+
+    async def meta(
+        self, *, refresh: bool = False, request_options: RequestOptions | None = None
+    ) -> Meta:
+        """Deployment facts (public, cached after the first call).
+
+        Chain, USDC deployment, contract addresses, feature flags and the
+        EIP-712 chain id for owner authorizations.
+        """
+        if self._meta is None or refresh:
+            self._meta = await self._request_model(
+                ops.GET_META, Meta, request_options=request_options
+            )
+        return self._meta
+
+    async def owner_authorization_chain_id(self) -> int:
+        """EIP-712 domain chain id for owner authorizations (testnets only).
+
+        The client's ``chain_id`` if set, else ``owner_authorization_chain_id``
+        from ``GET /v1/meta`` (fetched once and cached).
+
+        Raises:
+            MainnetLockedError: The chain id is a mainnet.
+        """
+        chain_id = self._config.chain_id
+        if chain_id is None:
+            chain_id = (await self.meta()).owner_authorization_chain_id
+        assert_testnet(chain_id)
+        return chain_id
 
     async def call(
         self,
@@ -332,8 +365,13 @@ class AsyncAgentBank:
             try:
                 response = await self._http.send(request)
             except httpx.TransportError as exc:
-                if attempt < prepared.max_retries and is_retryable_exception(prepared, exc):
-                    await self._sleep(retry_delay(attempt))
+                delay = retry_delay(attempt)
+                if (
+                    attempt < prepared.max_retries
+                    and delay is not None
+                    and is_retryable_exception(prepared, exc)
+                ):
+                    await self._sleep(delay)
                     attempt += 1
                     continue
                 if isinstance(exc, httpx.TimeoutException):
@@ -341,8 +379,13 @@ class AsyncAgentBank:
                 raise APIConnectionError(f"{prepared.operation.operation_id}: {exc}") from exc
             if response.is_success:
                 return response
-            if attempt < prepared.max_retries and is_retryable_response(prepared, response):
-                await self._sleep(retry_delay(attempt, response))
+            delay = retry_delay(attempt, response)
+            if (
+                attempt < prepared.max_retries
+                and delay is not None
+                and is_retryable_response(prepared, response)
+            ):
+                await self._sleep(delay)
                 attempt += 1
                 continue
             raise error_from_response(response)

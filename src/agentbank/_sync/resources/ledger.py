@@ -18,7 +18,7 @@ __all__ = ["Ledger"]
 class Ledger(APIResource):
     """The double-entry ledger: immutable, balanced journal entries."""
 
-    def entries(
+    def list_entries(
         self,
         account_id: str | None = None,
         *,
@@ -38,7 +38,7 @@ class Ledger(APIResource):
             request_options=request_options,
         )
 
-    def entries_all(
+    def list_entries_all(
         self,
         account_id: str | None = None,
         *,

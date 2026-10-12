@@ -10,10 +10,15 @@ from typing import Any, Literal
 
 from agentbank import _operations as ops
 from agentbank._base_client import RequestOptions, new_idempotency_key
-from agentbank._resource_helpers import compact, signature_idempotency_key
+from agentbank._resource_helpers import (
+    compact,
+    has_pending_signature,
+    pending_signing_request,
+    signature_idempotency_key,
+)
 from agentbank._resource_helpers import payee as normalize_payee
 from agentbank._sync.resources._base import APIResource
-from agentbank.errors import AgentBankError
+from agentbank.errors import PaymentFailedError
 from agentbank.models import Stream
 from agentbank.money import MoneyInput, coerce_money
 
@@ -106,11 +111,13 @@ class Streams(APIResource):
             idempotency_key=idempotency_key or new_idempotency_key(),
             request_options=request_options,
         )
-        if stream.signing_request is None:
+        if stream.status == "failed":
+            raise PaymentFailedError(f"Stream {stream.id} failed", resource=stream)
+        if not has_pending_signature(stream):
             return stream
         return self.sign_and_submit(stream, request_options=request_options)
 
-    def get(self, stream_id: str, *, request_options: RequestOptions | None = None) -> Stream:
+    def retrieve(self, stream_id: str, *, request_options: RequestOptions | None = None) -> Stream:
         """Get a stream."""
         return self._request(
             ops.GET_STREAM, Stream, path_params={"id": stream_id}, request_options=request_options
@@ -139,15 +146,25 @@ class Streams(APIResource):
     def sign_and_submit(
         self, stream: Stream, *, request_options: RequestOptions | None = None
     ) -> Stream:
-        """Sign the stream's pending ``signing_request`` with the session key and submit it."""
-        if stream.signing_request is None:
-            raise AgentBankError("invalid_state", f"Stream {stream.id} has nothing to sign")
-        session_id, signature = self._client._sign_operation(stream.signing_request)
+        """Sign the stream's pending operation with the session key and submit it.
+
+        Use it after :meth:`create` or :meth:`cancel` when ``pending_action`` is
+        set. Only an operation with a ``pending_action`` and an unexpired
+        ``signing_request`` is signed.
+
+        Raises:
+            AgentBankError: ``invalid_state`` when nothing (unexpired) is pending.
+            PaymentFailedError: The stream failed on-chain.
+        """
+        if stream.status == "failed":
+            raise PaymentFailedError(f"Stream {stream.id} failed", resource=stream)
+        signing_request = pending_signing_request(stream)
+        session_id, signature = self._client._sign_operation(signing_request)
         return self.submit_signature(
             stream.id,
             signature=signature,
             session_id=session_id,
-            idempotency_key=signature_idempotency_key(stream.id, stream.signing_request),
+            idempotency_key=signature_idempotency_key(stream.id, signing_request),
             request_options=request_options,
         )
 

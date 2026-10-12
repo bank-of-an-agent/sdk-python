@@ -5,12 +5,13 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from agentbank import _operations as ops
+from agentbank import owner_payloads
 from agentbank._async.resources._base import AsyncAPIResource
 from agentbank._base_client import RequestOptions
-from agentbank._resource_helpers import compact, without_owner_authorization
+from agentbank._resource_helpers import compact
 from agentbank.keys import SessionKey, SignerLike
 from agentbank.models import Account, AutoTopUpRule, ListFundsResponse, Org, SweepRule
-from agentbank.money import MoneyInput, coerce_money
+from agentbank.money import MoneyInput
 
 __all__ = ["AsyncTreasury"]
 
@@ -38,7 +39,7 @@ class AsyncTreasury(AsyncAPIResource):
             request_options=request_options,
         )
 
-    async def set_account(
+    async def set(
         self,
         *,
         account_id: str,
@@ -51,18 +52,20 @@ class AsyncTreasury(AsyncAPIResource):
 
         Args:
             account_id: The treasury account.
-            owner_authorization: A pre-signed ``treasury.set`` authorization.
-            owner: Alternatively, the owner key; the SDK signs ``treasury.set`` with
-                subject = the org id and payload ``{"account_id": account_id}``.
+            owner_authorization: A pre-signed ``treasury.set`` authorization
+                (subject = the org id, payload ``{"account_id": account_id}``).
+            owner: Alternatively, the owner key; the SDK looks up the org id and
+                signs it.
             idempotency_key: Optional key; generated when omitted.
             request_options: Per-request overrides.
         """
-        body = compact(account_id=account_id, owner_authorization=owner_authorization)
-        if owner_authorization is None and owner is not None:
-            org = await self._client.orgs.me(request_options=request_options)
-            body["owner_authorization"] = self._owner_authorization(
-                owner, "treasury.set", org.id, without_owner_authorization(body)
-            )
+        body: dict[str, Any] = {"account_id": account_id}
+        if owner_authorization is not None:
+            body["owner_authorization"] = owner_authorization
+        elif owner is not None:
+            org = await self._client.orgs.retrieve(request_options=request_options)
+            change = owner_payloads.treasury_set(org.id, account_id)
+            body["owner_authorization"] = await self._owner_authorization(owner, change)
         return await self._request(
             ops.SET_TREASURY,
             Org,
@@ -80,7 +83,7 @@ class AsyncTreasury(AsyncAPIResource):
         )
         return None if data is None else AutoTopUpRule.model_validate(data)
 
-    async def set_auto_topup(
+    async def put_auto_topup(
         self,
         agent_id: str,
         *,
@@ -99,22 +102,20 @@ class AsyncTreasury(AsyncAPIResource):
             refill_to: Balance to top up to.
             when_below: Trigger threshold.
             max_per_day: Daily cap on top-ups.
-            owner_authorization: A pre-signed ``topup.set`` authorization.
-            owner: Alternatively, the owner key; the SDK signs ``topup.set`` with
-                subject = ``agent_id`` and the request body as payload.
+            owner_authorization: A pre-signed ``topup.set`` authorization
+                (subject = ``agent_id``, payload ``{refill_to, when_below, max_per_day}``).
+            owner: Alternatively, the owner key; the SDK signs it.
             idempotency_key: Optional key; generated when omitted.
             request_options: Per-request overrides.
         """
-        body = compact(
-            refill_to=coerce_money(refill_to),
-            when_below=coerce_money(when_below),
-            max_per_day=coerce_money(max_per_day),
-            owner_authorization=owner_authorization,
+        rule = owner_payloads.topup_set(
+            agent_id, refill_to=refill_to, when_below=when_below, max_per_day=max_per_day
         )
-        if owner_authorization is None and owner is not None:
-            body["owner_authorization"] = self._owner_authorization(
-                owner, "topup.set", agent_id, without_owner_authorization(body)
-            )
+        body: dict[str, Any] = dict(rule.payload)
+        if owner_authorization is not None:
+            body["owner_authorization"] = owner_authorization
+        elif owner is not None:
+            body["owner_authorization"] = await self._owner_authorization(owner, rule)
         return await self._request(
             ops.PUT_AUTO_TOP_UP,
             AutoTopUpRule,
@@ -132,7 +133,7 @@ class AsyncTreasury(AsyncAPIResource):
             ops.LIST_FUNDS, ListFundsResponse, request_options=request_options
         )
 
-    async def set_sweep_rule(
+    async def put_sweep_rule(
         self,
         account_id: str,
         *,
@@ -154,23 +155,24 @@ class AsyncTreasury(AsyncAPIResource):
             max_share_bps: Maximum share of the balance to sweep (basis points).
             floor: Balance that always stays liquid (server default: two days of
                 trailing seven-day spend).
-            owner_authorization: A pre-signed ``sweep.set`` authorization.
-            owner: Alternatively, the owner key; the SDK signs ``sweep.set`` with
-                subject = ``account_id`` and the request body as payload.
+            owner_authorization: A pre-signed ``sweep.set`` authorization
+                (subject = ``account_id``, payload = the body without it).
+            owner: Alternatively, the owner key; the SDK signs it.
             idempotency_key: Optional key; generated when omitted.
             request_options: Per-request overrides.
         """
-        body = compact(
+        rule = owner_payloads.sweep_set(
+            account_id,
             fund_id=fund_id,
-            floor=coerce_money(floor) if floor is not None else None,
-            threshold=coerce_money(threshold),
+            threshold=threshold,
             max_share_bps=max_share_bps,
-            owner_authorization=owner_authorization,
+            floor=floor,
         )
-        if owner_authorization is None and owner is not None:
-            body["owner_authorization"] = self._owner_authorization(
-                owner, "sweep.set", account_id, without_owner_authorization(body)
-            )
+        body: dict[str, Any] = dict(rule.payload)
+        if owner_authorization is not None:
+            body["owner_authorization"] = owner_authorization
+        elif owner is not None:
+            body["owner_authorization"] = await self._owner_authorization(owner, rule)
         return await self._request(
             ops.PUT_SWEEP_RULE,
             SweepRule,

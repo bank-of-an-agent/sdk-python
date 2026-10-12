@@ -10,10 +10,15 @@ from typing import Any, Literal
 
 from agentbank import _operations as ops
 from agentbank._base_client import RequestOptions, new_idempotency_key
-from agentbank._resource_helpers import compact, signature_idempotency_key
+from agentbank._resource_helpers import (
+    compact,
+    has_pending_signature,
+    pending_signing_request,
+    signature_idempotency_key,
+)
 from agentbank._resource_helpers import payee as normalize_payee
 from agentbank._sync.resources._base import APIResource
-from agentbank.errors import AgentBankError
+from agentbank.errors import PaymentFailedError
 from agentbank.models import Escrow
 from agentbank.money import MoneyInput, coerce_money
 
@@ -24,8 +29,9 @@ class Escrows(APIResource):
     """Funds locked in the ``AgentEscrow`` contract until released, refunded or resolved.
 
     Creating, releasing, refunding and disputing prepare an on-chain operation
-    that the session key signs (``signing_request``), like payments.
-    :meth:`lock` creates and signs in one call.
+    (``pending_action``) that the session key signs (``signing_request``), like
+    payments; call :meth:`sign_and_submit` afterwards. :meth:`lock` creates and
+    signs in one call.
     """
 
     def create(
@@ -114,11 +120,13 @@ class Escrows(APIResource):
             idempotency_key=idempotency_key or new_idempotency_key(),
             request_options=request_options,
         )
-        if escrow.signing_request is None:
+        if escrow.status == "failed":
+            raise PaymentFailedError(f"Escrow {escrow.id} failed", resource=escrow)
+        if not has_pending_signature(escrow):
             return escrow
         return self.sign_and_submit(escrow, request_options=request_options)
 
-    def get(self, escrow_id: str, *, request_options: RequestOptions | None = None) -> Escrow:
+    def retrieve(self, escrow_id: str, *, request_options: RequestOptions | None = None) -> Escrow:
         """Get an escrow."""
         return self._request(
             ops.GET_ESCROW, Escrow, path_params={"id": escrow_id}, request_options=request_options
@@ -147,15 +155,25 @@ class Escrows(APIResource):
     def sign_and_submit(
         self, escrow: Escrow, *, request_options: RequestOptions | None = None
     ) -> Escrow:
-        """Sign the escrow's pending ``signing_request`` with the session key and submit it."""
-        if escrow.signing_request is None:
-            raise AgentBankError("invalid_state", f"Escrow {escrow.id} has nothing to sign")
-        session_id, signature = self._client._sign_operation(escrow.signing_request)
+        """Sign the escrow's pending operation with the session key and submit it.
+
+        Use it after :meth:`create`, :meth:`release`, :meth:`refund` or
+        :meth:`dispute` when ``pending_action`` is set. Only an operation with a
+        ``pending_action`` and an unexpired ``signing_request`` is signed.
+
+        Raises:
+            AgentBankError: ``invalid_state`` when nothing (unexpired) is pending.
+            PaymentFailedError: The escrow failed on-chain.
+        """
+        if escrow.status == "failed":
+            raise PaymentFailedError(f"Escrow {escrow.id} failed", resource=escrow)
+        signing_request = pending_signing_request(escrow)
+        session_id, signature = self._client._sign_operation(signing_request)
         return self.submit_signature(
             escrow.id,
             signature=signature,
             session_id=session_id,
-            idempotency_key=signature_idempotency_key(escrow.id, escrow.signing_request),
+            idempotency_key=signature_idempotency_key(escrow.id, signing_request),
             request_options=request_options,
         )
 

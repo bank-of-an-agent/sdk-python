@@ -15,7 +15,7 @@ Testnet only (Base Sepolia). Quick tour::
 Everything is also available asynchronously via :class:`AsyncAgentBank`.
 """
 
-from agentbank import models
+from agentbank import models, owner_payloads
 from agentbank._async.client import AsyncAgentBank
 from agentbank._async.x402 import AsyncX402Transport
 from agentbank._base_client import RequestOptions
@@ -34,6 +34,7 @@ from agentbank.eip712 import (
 from agentbank.errors import (
     AgentBankError,
     APIConnectionError,
+    APIResponseValidationError,
     APITimeoutError,
     AuthenticationError,
     BadRequestError,
@@ -46,7 +47,9 @@ from agentbank.errors import (
     MainnetLockedError,
     NotFoundError,
     OwnerSignatureRequiredError,
+    PaymentDeniedError,
     PaymentError,
+    PaymentFailedError,
     PermissionDeniedError,
     PolicyDeniedError,
     RateLimitError,
@@ -65,6 +68,7 @@ __all__ = [
     "BASE_SEPOLIA",
     "OWNER_ACTIONS",
     "APIConnectionError",
+    "APIResponseValidationError",
     "APITimeoutError",
     "AgentBank",
     "AgentBankError",
@@ -83,7 +87,9 @@ __all__ = [
     "NotFoundError",
     "OwnerAction",
     "OwnerSignatureRequiredError",
+    "PaymentDeniedError",
     "PaymentError",
+    "PaymentFailedError",
     "PermissionDeniedError",
     "PolicyDeniedError",
     "RateLimitError",
@@ -110,6 +116,7 @@ __all__ = [
     "money",
     "owner_authorization_typed_data",
     "owner_authorize",
+    "owner_payloads",
     "parse_amount",
     "sign_request",
     "sign_webhook",

@@ -8,10 +8,9 @@ from collections.abc import Mapping
 from typing import Any
 
 from agentbank import _operations as ops
+from agentbank import owner_payloads
 from agentbank._base_client import RequestOptions
-from agentbank._resource_helpers import compact
 from agentbank._sync.resources._base import APIResource
-from agentbank.canonical import to_jsonable
 from agentbank.keys import SessionKey, SignerLike
 from agentbank.models import Mandate, OpenPaymentMandate
 
@@ -36,21 +35,21 @@ class Mandates(APIResource):
         Args:
             agent_id: The agent receiving the mandate.
             mandate: The AP2 open Payment Mandate (``vct``, ``constraints``,
-                ``iat``, ``exp``, ``agent_id`` ...).
+                ``iat``, ``exp``, ``agent_id`` ...). Its defaults are made explicit
+                before it is sent and signed.
             owner_authorization: A pre-signed ``mandate.issue`` authorization over
-                the mandate object (subject = ``agent_id``).
+                the mandate (subject = ``agent_id``; see
+                :func:`agentbank.owner_payloads.mandate_issue`).
             owner: Alternatively, the owner key; the SDK signs it.
             idempotency_key: Optional key; generated when omitted.
             request_options: Per-request overrides.
         """
-        mandate_json = to_jsonable(mandate)
-        body = compact(agent_id=agent_id, mandate=mandate_json)
+        issue = owner_payloads.mandate_issue(agent_id, mandate)
+        body: dict[str, Any] = {"agent_id": agent_id, "mandate": issue.payload}
         if owner_authorization is not None:
             body["owner_authorization"] = owner_authorization
         elif owner is not None:
-            body["owner_authorization"] = self._owner_authorization(
-                owner, "mandate.issue", agent_id, mandate_json
-            )
+            body["owner_authorization"] = self._owner_authorization(owner, issue)
         return self._request(
             ops.CREATE_MANDATE,
             Mandate,
@@ -59,7 +58,9 @@ class Mandates(APIResource):
             request_options=request_options,
         )
 
-    def get(self, mandate_id: str, *, request_options: RequestOptions | None = None) -> Mandate:
+    def retrieve(
+        self, mandate_id: str, *, request_options: RequestOptions | None = None
+    ) -> Mandate:
         """Get a mandate, including cumulative ``spent`` under it."""
         return self._request(
             ops.GET_MANDATE,

@@ -648,10 +648,7 @@ X402_VERIFY: Final = Operation(
     operation_id="x402Verify",
     method="POST",
     path="/v1/x402/verify",
-    auth=(
-        "seller",
-        "public",
-    ),
+    auth=("public",),
     idempotent=False,
     service="facilitator",
     success_status=200,
@@ -665,10 +662,7 @@ X402_SETTLE: Final = Operation(
     operation_id="x402Settle",
     method="POST",
     path="/v1/x402/settle",
-    auth=(
-        "seller",
-        "public",
-    ),
+    auth=("public",),
     idempotent=False,
     service="facilitator",
     success_status=200,
@@ -1238,6 +1232,20 @@ GET_REVENUE_REPORT: Final = Operation(
     response_media_types=("application/json",),
 )
 
+GET_META: Final = Operation(
+    operation_id="getMeta",
+    method="GET",
+    path="/v1/meta",
+    auth=("public",),
+    idempotent=False,
+    service="api",
+    success_status=200,
+    path_params=(),
+    query_params=(),
+    has_body=False,
+    response_media_types=("application/json",),
+)
+
 HEALTH: Final = Operation(
     operation_id="health",
     method="GET",
@@ -1331,6 +1339,7 @@ OPERATIONS: Final[dict[str, Operation]] = {
     "changePlan": CHANGE_PLAN,
     "getFees": GET_FEES,
     "getRevenueReport": GET_REVENUE_REPORT,
+    "getMeta": GET_META,
     "health": HEALTH,
 }
 """Every operation in the API, keyed by ``operationId``."""

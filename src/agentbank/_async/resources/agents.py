@@ -6,9 +6,10 @@ from collections.abc import AsyncIterator, Mapping
 from typing import Any, Literal
 
 from agentbank import _operations as ops
+from agentbank import owner_payloads
 from agentbank._async.resources._base import AsyncAPIResource
 from agentbank._base_client import RequestOptions
-from agentbank._resource_helpers import compact, without_owner_authorization
+from agentbank._resource_helpers import compact
 from agentbank.keys import SessionKey, SignerLike
 from agentbank.models import Agent, ListAgentsResponse
 
@@ -88,7 +89,9 @@ class AsyncAgents(AsyncAPIResource):
             for item in page.data:
                 yield item
 
-    async def get(self, agent_id: str, *, request_options: RequestOptions | None = None) -> Agent:
+    async def retrieve(
+        self, agent_id: str, *, request_options: RequestOptions | None = None
+    ) -> Agent:
         """Get an agent (principal, or the agent itself)."""
         return await self._request(
             ops.GET_AGENT, Agent, path_params={"id": agent_id}, request_options=request_options
@@ -127,17 +130,18 @@ class AsyncAgents(AsyncAPIResource):
         Args:
             agent_id: The agent.
             reason: Why the agent is being unfrozen.
-            owner_authorization: A pre-signed ``agent.unfreeze`` authorization.
-            owner: Alternatively, the owner key; the SDK signs ``agent.unfreeze``
-                with subject = ``agent_id`` and payload ``{"reason": reason}``.
+            owner_authorization: A pre-signed ``agent.unfreeze`` authorization
+                (subject = ``agent_id``, payload ``{"reason": reason}``).
+            owner: Alternatively, the owner key; the SDK signs it.
             idempotency_key: Optional key; generated when omitted.
             request_options: Per-request overrides.
         """
-        body = compact(reason=reason, owner_authorization=owner_authorization)
-        if owner_authorization is None and owner is not None:
-            body["owner_authorization"] = self._owner_authorization(
-                owner, "agent.unfreeze", agent_id, without_owner_authorization(body)
-            )
+        unfreeze = owner_payloads.agent_unfreeze(agent_id, reason)
+        body: dict[str, Any] = dict(unfreeze.payload)
+        if owner_authorization is not None:
+            body["owner_authorization"] = owner_authorization
+        elif owner is not None:
+            body["owner_authorization"] = await self._owner_authorization(owner, unfreeze)
         return await self._request(
             ops.UNFREEZE_AGENT,
             Agent,

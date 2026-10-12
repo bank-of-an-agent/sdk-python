@@ -6,16 +6,21 @@ The flow, implemented by :class:`agentbank.X402Transport` and
 1. A resource answers ``402`` with a challenge: x402 v2 sends a base64 JSON
    ``PaymentRequired`` in the ``PAYMENT-REQUIRED`` header; x402 v1 sends it as
    the JSON body (and expects the payment in ``X-PAYMENT``).
-2. :func:`select_requirement` picks the first ``exact`` USDC requirement on a
-   supported testnet whose price is within the client's ``max_amount`` (and
-   whose host is in ``allowed_domains``, when given). Mainnets are refused.
+2. :func:`select_requirement` picks the cheapest ``exact`` USDC (EIP-3009)
+   requirement on the configured network (Base Sepolia by default) and refuses
+   it if the price exceeds the client's ``max_amount`` (1.00 USDC by default) or
+   the host is not in ``allowed_domains``. Mainnets are refused.
 3. The agent asks Agent Bank (``POST /v1/x402/pay``) to authorize the payment;
    policy (domain allowlists, caps, velocity, mandates) runs server-side and the
-   API returns an EIP-3009 ``TransferWithAuthorization`` for the spend key.
+   API either denies it or returns an EIP-3009 ``TransferWithAuthorization`` for
+   the spend key.
 4. :func:`build_payment_header` checks that authorization against the challenge
    (payee, exact amount, asset, chain, validity window) and only then signs it
    with the spend key, producing the ``PAYMENT-SIGNATURE`` (v2) or ``X-PAYMENT``
-   (v1) header for the retried request.
+   (v1) header for the retried request. A seller that answers 402 again raises
+   ``X402Error(reason="payment_rejected")``.
+
+Error reasons and codes match the TypeScript SDK (``@agentbank/sdk``).
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ from dataclasses import dataclass
 from typing import Any, Final
 from urllib.parse import urlsplit
 
+from agentbank._resource_helpers import denied_error
 from agentbank.chains import AssetInfo, ChainInfo, chain_for_network, find_asset
 from agentbank.eip712 import transfer_with_authorization_typed_data
 from agentbank.errors import AgentBankError, X402Error
@@ -38,6 +44,8 @@ from agentbank.models import Payment, X402PayResponse
 from agentbank.money import format_amount
 
 __all__ = [
+    "DEFAULT_MAX_AMOUNT_PER_REQUEST",
+    "DEFAULT_X402_NETWORK",
     "PAYMENT_REQUIRED_HEADER",
     "PAYMENT_RESPONSE_HEADER",
     "PAYMENT_SIGNATURE_HEADER",
@@ -48,11 +56,13 @@ __all__ = [
     "PaymentRequired",
     "SelectedRequirement",
     "X402Receipt",
+    "authorization_problems",
     "build_payment_header",
     "decode_header",
     "decode_payment_response",
     "encode_header",
     "parse_payment_required",
+    "rejection_reason",
     "select_requirement",
     "x402_receipt",
 ]
@@ -66,8 +76,17 @@ V1_PAYMENT_RESPONSE_HEADER: Final = "X-PAYMENT-RESPONSE"
 #: Key under which transports attach an :class:`X402Receipt` to ``response.extensions``.
 RECEIPT_EXTENSION: Final = "agentbank.x402"
 
-#: Seconds of clock skew tolerated when checking an authorization's validity window.
+#: Default x402 network: Base Sepolia.
+DEFAULT_X402_NETWORK: Final = "eip155:84532"
+
+#: Default client-side ceiling per paid request, in USDC (as in the TypeScript SDK).
+DEFAULT_MAX_AMOUNT_PER_REQUEST: Final = "1.00"
+
+#: Seconds of clock skew tolerated beyond ``maxTimeoutSeconds`` for ``validBefore``.
 CLOCK_SKEW_SECONDS: Final = 300
+
+#: Seconds an authorization may start in the future (``validAfter``).
+VALID_AFTER_SKEW_SECONDS: Final = 60
 
 _ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _BYTES32_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
@@ -87,7 +106,7 @@ def decode_header(value: str) -> dict[str, Any]:
     """Decode an x402 header value (standard or URL-safe base64, padding optional).
 
     Raises:
-        X402Error: ``x402_invalid_challenge`` if it is not base64 JSON object.
+        X402Error: ``invalid_challenge`` if it is not base64 JSON object.
     """
     text = value.strip()
     padded = text + "=" * (-len(text) % 4)
@@ -95,9 +114,9 @@ def decode_header(value: str) -> dict[str, Any]:
         raw = base64.b64decode(padded.replace("-", "+").replace("_", "/"), validate=True)
         data = json.loads(raw)
     except (binascii.Error, ValueError) as exc:
-        raise X402Error("x402_invalid_challenge", "x402 header is not base64 JSON") from exc
+        raise X402Error("invalid_challenge", "x402 header is not base64 JSON") from exc
     if not isinstance(data, dict):
-        raise X402Error("x402_invalid_challenge", "x402 header must encode a JSON object")
+        raise X402Error("invalid_challenge", "x402 header must encode a JSON object")
     return data
 
 
@@ -136,7 +155,7 @@ def parse_payment_required(headers: Mapping[str, str], body: bytes | str) -> Pay
     servers that also send the challenge in the body).
 
     Raises:
-        X402Error: ``x402_invalid_challenge`` if no valid challenge is present.
+        X402Error: ``invalid_challenge`` if no valid challenge is present.
     """
     header = _header(headers, PAYMENT_REQUIRED_HEADER)
     if header:
@@ -148,16 +167,16 @@ def parse_payment_required(headers: Mapping[str, str], body: bytes | str) -> Pay
             parsed = None
         if not isinstance(parsed, dict):
             raise X402Error(
-                "x402_invalid_challenge",
+                "invalid_challenge",
                 "402 response has no PAYMENT-REQUIRED header and no x402 JSON body",
             )
         data = parsed
     version = data.get("x402Version")
     accepts = data.get("accepts")
     if not isinstance(version, int) or isinstance(version, bool) or version not in (1, 2):
-        raise X402Error("x402_invalid_challenge", f"Unsupported x402Version {version!r}")
+        raise X402Error("invalid_challenge", f"Unsupported x402Version {version!r}")
     if not isinstance(accepts, list) or not all(isinstance(a, dict) for a in accepts):
-        raise X402Error("x402_invalid_challenge", "x402 challenge has no 'accepts' list")
+        raise X402Error("invalid_challenge", "x402 challenge has no 'accepts' list")
     resource = data.get("resource")
     error = data.get("error")
     return PaymentRequired(
@@ -208,22 +227,28 @@ def _host(url: str) -> str:
 
 
 def _evaluate(
-    requirement: Mapping[str, Any], version: int
-) -> tuple[ChainInfo, AssetInfo, int, str, int] | str:
-    """Return ``(chain, asset, amount, pay_to, timeout)`` or the reason it is unusable."""
+    requirement: Mapping[str, Any], version: int, chain: ChainInfo
+) -> tuple[AssetInfo, int, str, int] | str:
+    """Return ``(asset, amount, pay_to, timeout)`` or the reason it is unusable."""
     if requirement.get("scheme") != "exact":
         return f"scheme {requirement.get('scheme')!r} is not supported (only 'exact')"
     network = requirement.get("network")
     if not isinstance(network, str):
         return "missing network"
     try:
-        chain = chain_for_network(network)
+        offered_chain = chain_for_network(network)
     except AgentBankError as exc:
         return f"network {network!r}: {exc.detail}"
+    if offered_chain.id != chain.id:
+        return f"network {network!r} is not {chain.caip2}"
     asset_address = requirement.get("asset")
     asset = find_asset(chain.id, asset_address) if isinstance(asset_address, str) else None
     if asset is None:
         return f"asset {asset_address!r} is not USDC on {chain.display_name}"
+    extra = requirement.get("extra")
+    method = extra.get("assetTransferMethod") if isinstance(extra, Mapping) else None
+    if method not in (None, "eip3009", "default"):
+        return f"asset transfer method {method!r} is not supported (only EIP-3009)"
     raw_amount = requirement.get("amount" if version >= 2 else "maxAmountRequired")
     if not isinstance(raw_amount, str) or not _DIGITS_RE.match(raw_amount) or int(raw_amount) <= 0:
         return f"invalid amount {raw_amount!r}"
@@ -233,7 +258,7 @@ def _evaluate(
     timeout = requirement.get("maxTimeoutSeconds")
     if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
         return f"invalid maxTimeoutSeconds {timeout!r}"
-    return chain, asset, int(raw_amount), pay_to, timeout
+    return asset, int(raw_amount), pay_to, timeout
 
 
 def select_requirement(
@@ -241,77 +266,90 @@ def select_requirement(
     *,
     request_url: str,
     max_amount: int,
+    network: str = DEFAULT_X402_NETWORK,
     allowed_domains: Collection[str] | None = None,
 ) -> SelectedRequirement:
     """Choose which offered requirement to pay.
 
-    Picks the first ``exact`` requirement for USDC on a supported testnet whose
-    amount is at most ``max_amount`` (atomic units, i.e. USDC micro-units).
+    Picks the **cheapest** acceptable requirement: scheme ``exact``, the
+    configured network, Agent Bank's USDC on that network, the EIP-3009
+    transfer method, a valid payee and timeout; then checks it against
+    ``max_amount`` (atomic units, i.e. USDC micro-units).
 
     Args:
         challenge: The parsed challenge.
         request_url: The URL that answered 402 (its host is the x402 domain).
         max_amount: Client-side price ceiling in atomic units.
+        network: CAIP-2 network to pay on (default Base Sepolia, ``eip155:84532``).
         allowed_domains: Optional allowlist of hosts the client may pay.
 
     Raises:
-        X402Error: ``x402_domain_not_allowed``, ``x402_unsupported`` or
-            ``x402_amount_exceeds_limit``.
+        X402Error: ``domain_not_allowed``, ``no_acceptable_requirement`` or
+            ``amount_exceeds_limit``.
+        MainnetLockedError: ``network`` is a mainnet.
     """
+    chain = chain_for_network(network)
     host = _host(request_url)
     if allowed_domains is not None and host not in {d.lower() for d in allowed_domains}:
-        raise X402Error("x402_domain_not_allowed", f"Paying {host!r} is not allowed by this client")
+        raise X402Error("domain_not_allowed", f"Paying {host!r} is not allowed by this client")
     reasons: list[str] = []
-    cheapest_over: int | None = None
-    for offered in challenge.accepts:
-        evaluated = _evaluate(offered, challenge.x402_version)
+    candidates: list[tuple[int, int, AssetInfo, str, int]] = []
+    for index, offered in enumerate(challenge.accepts):
+        evaluated = _evaluate(offered, challenge.x402_version, chain)
         if isinstance(evaluated, str):
             reasons.append(evaluated)
             continue
-        chain, asset, amount, pay_to, timeout = evaluated
-        if amount > max_amount:
-            cheapest_over = amount if cheapest_over is None else min(cheapest_over, amount)
-            continue
-        extra = offered.get("extra")
-        requirements = {
-            "scheme": "exact",
-            "network": chain.caip2,
-            "asset": offered["asset"],
-            "amount": str(amount),
-            "payTo": pay_to,
-            "maxTimeoutSeconds": timeout,
-            "extra": dict(extra) if isinstance(extra, dict) else {},
-        }
-        info = challenge.resource or {}
-        if challenge.x402_version == 1:
-            info = {
-                key: offered[key]
-                for key in ("description", "mimeType")
-                if isinstance(offered.get(key), str) and offered[key]
-            }
-        resource = {**info, "url": request_url}
-        return SelectedRequirement(
-            x402_version=challenge.x402_version,
-            accepted=dict(offered),
-            requirements=requirements,
-            resource=resource,
-            payload_resource=challenge.resource,
-            network=str(offered["network"]),
-            chain=chain,
-            asset=asset,
-            amount=amount,
-            pay_to=pay_to,
-            max_timeout_seconds=timeout,
-        )
-    if cheapest_over is not None:
-        limit = format_amount(max_amount)
-        price = format_amount(cheapest_over)
+        asset, amount, pay_to, timeout = evaluated
+        candidates.append((amount, index, asset, pay_to, timeout))
+    if not candidates:
+        detail = "; ".join(reasons) or "the challenge offers no payment options"
+        raise X402Error("no_acceptable_requirement", f"No acceptable x402 payment option: {detail}")
+    amount, index, asset, pay_to, timeout = min(candidates, key=lambda c: (c[0], c[1]))
+    if amount > max_amount:
         raise X402Error(
-            "x402_amount_exceeds_limit",
-            f"{host} asks for {price} USDC, above this client's max_amount of {limit} USDC",
+            "amount_exceeds_limit",
+            f"Price {format_amount(amount)} USDC exceeds max_amount "
+            f"{format_amount(max_amount)} USDC ({host})",
         )
-    detail = "; ".join(reasons) or "the challenge offers no payment options"
-    raise X402Error("x402_unsupported", f"No acceptable x402 payment option: {detail}")
+    offered = challenge.accepts[index]
+    extra = offered.get("extra")
+    requirements = {
+        "scheme": "exact",
+        "network": chain.caip2,
+        "asset": offered["asset"],
+        "amount": str(amount),
+        "payTo": pay_to,
+        "maxTimeoutSeconds": timeout,
+        "extra": dict(extra) if isinstance(extra, dict) else {},
+    }
+    info = challenge.resource or {}
+    if challenge.x402_version == 1:
+        info = {
+            key: offered[key]
+            for key in ("description", "mimeType")
+            if isinstance(offered.get(key), str) and offered[key]
+        }
+    resource = {
+        **{
+            k: info[k]
+            for k in ("description", "mimeType")
+            if isinstance(info.get(k), str) and info[k]
+        },
+        "url": request_url,
+    }
+    return SelectedRequirement(
+        x402_version=challenge.x402_version,
+        accepted=dict(offered),
+        requirements=requirements,
+        resource=resource,
+        payload_resource=challenge.resource,
+        network=str(offered["network"]),
+        chain=chain,
+        asset=asset,
+        amount=amount,
+        pay_to=pay_to,
+        max_timeout_seconds=timeout,
+    )
 
 
 # --------------------------------------------------------------------- payment
@@ -332,8 +370,49 @@ class PaymentHeader:
     payload: dict[str, Any]
 
 
-def _mismatch(detail: str, payment: Payment) -> X402Error:
-    return X402Error("x402_authorization_mismatch", detail, payment=payment)
+def authorization_problems(
+    selected: SelectedRequirement,
+    response: X402PayResponse,
+    spend_address: str,
+    *,
+    now: int | None = None,
+) -> list[str]:
+    """Every way the API's authorization differs from the challenge (empty if none).
+
+    Defense in depth: whatever the API returns, the spend key must only sign
+    exactly what the seller asked for.
+    """
+    authorization, domain = response.authorization, response.eip712_domain
+    if authorization is None or domain is None:
+        return ["Agent Bank returned no authorization to sign"]
+    auth = authorization.model_dump(mode="json", by_alias=True)
+    current = int(time.time()) if now is None else now
+    problems: list[str] = []
+    if auth["from"].lower() != spend_address.lower():
+        problems.append("from is not the spend key")
+    if auth["to"].lower() != selected.pay_to.lower():
+        problems.append("to differs from payTo")
+    if int(auth["value"]) != selected.amount:
+        problems.append("value differs from the price")
+    if domain.chainId != selected.chain.id:
+        problems.append("chainId differs from the network")
+    if domain.verifyingContract.lower() != selected.asset.address.lower():
+        problems.append("verifyingContract differs from the asset")
+    extra = selected.requirements["extra"]
+    if isinstance(extra.get("name"), str) and extra["name"] != domain.name:
+        problems.append("EIP-712 name differs")
+    if isinstance(extra.get("version"), str) and extra["version"] != domain.version:
+        problems.append("EIP-712 version differs")
+    if not _BYTES32_RE.match(auth["nonce"]):
+        problems.append("nonce is not 32 bytes")
+    valid_before = int(auth["validBefore"])
+    if valid_before <= current:
+        problems.append("authorization already expired")
+    if valid_before > current + selected.max_timeout_seconds + CLOCK_SKEW_SECONDS:
+        problems.append("validity exceeds maxTimeoutSeconds")
+    if int(auth["validAfter"]) > current + VALID_AFTER_SKEW_SECONDS:
+        problems.append("authorization not valid yet")
+    return problems
 
 
 def build_payment_header(
@@ -345,50 +424,43 @@ def build_payment_header(
 ) -> PaymentHeader:
     """Check the API's EIP-3009 authorization against the challenge, sign it, encode it.
 
-    The spend key signs only if the authorization pays exactly the offered
-    amount, to the offered payee, in the offered asset and chain, from the
-    spend key itself, within a sane validity window. Anything else means the
-    API and the challenge disagree, and nothing is signed.
+    The spend key signs only if the payment is ``requires_signature`` and the
+    authorization pays exactly the offered amount, to the offered payee, in the
+    offered asset and chain, from the spend key itself, within a sane validity
+    window. Anything else means the API and the challenge disagree, and nothing
+    is signed.
 
     Raises:
-        X402Error: ``x402_not_authorized`` (approval required or denied) or
-            ``x402_authorization_mismatch``.
+        PaymentDeniedError: Agent Bank denied the payment (policy).
+        X402Error: ``approval_required``, ``unexpected_status`` or
+            ``authorization_mismatch``.
     """
     payment = response.payment
-    authorization = response.authorization
-    domain = response.eip712_domain
-    if authorization is None or domain is None:
+    if payment.status == "denied":
+        raise denied_error(payment)
+    if payment.status == "requires_approval":
         raise X402Error(
-            "x402_not_authorized",
-            f"x402 payment {payment.id} is {payment.status}; nothing to sign",
+            "approval_required",
+            "This x402 payment needs human approval, and x402 cannot wait for approvals; "
+            "ask the owner to adjust the approval threshold",
             payment=payment,
         )
-    auth = authorization.model_dump(mode="json", by_alias=True)
-    current = int(time.time()) if now is None else now
-    if auth["from"].lower() != signer.address.lower():
-        raise _mismatch("Authorization is not from this client's spend key", payment)
-    if auth["to"].lower() != selected.pay_to.lower():
-        raise _mismatch("Authorization pays a different address than the challenge", payment)
-    if int(auth["value"]) != selected.amount:
-        raise _mismatch("Authorization amount differs from the challenge amount", payment)
-    if domain.verifyingContract.lower() != selected.asset.address.lower():
-        raise _mismatch("Authorization is for a different token than the challenge", payment)
-    if domain.chainId != selected.chain.id:
-        raise _mismatch("Authorization is for a different chain than the challenge", payment)
-    extra = selected.requirements["extra"]
-    for key, expected in (("name", domain.name), ("version", domain.version)):
-        if isinstance(extra.get(key), str) and extra[key] != expected:
-            raise _mismatch(f"Token EIP-712 {key} differs from the challenge", payment)
-    if not _BYTES32_RE.match(auth["nonce"]):
-        raise _mismatch("Authorization nonce is not 32 bytes", payment)
-    valid_after, valid_before = int(auth["validAfter"]), int(auth["validBefore"])
-    if valid_before <= current:
-        raise _mismatch("Authorization has already expired", payment)
-    if valid_before > current + selected.max_timeout_seconds + CLOCK_SKEW_SECONDS:
-        raise _mismatch("Authorization is valid for longer than the challenge allows", payment)
-    if valid_after > current + CLOCK_SKEW_SECONDS:
-        raise _mismatch("Authorization is not valid yet", payment)
-
+    if payment.status != "requires_signature" or response.authorization is None:
+        raise X402Error(
+            "unexpected_status",
+            f'Unexpected x402 payment status "{payment.status}"',
+            payment=payment,
+        )
+    problems = authorization_problems(selected, response, signer.address, now=now)
+    if problems:
+        raise X402Error(
+            "authorization_mismatch",
+            f"Refusing to sign the x402 authorization: {'; '.join(problems)}",
+            payment=payment,
+        )
+    assert response.eip712_domain is not None
+    domain = response.eip712_domain
+    auth = response.authorization.model_dump(mode="json", by_alias=True)
     eip712_domain = {
         "name": domain.name,
         "version": domain.version,
@@ -414,6 +486,20 @@ def build_payment_header(
         }
         name = V1_PAYMENT_HEADER
     return PaymentHeader(name=name, value=encode_header(payload), payload=payload)
+
+
+def rejection_reason(headers: Mapping[str, str], body: bytes | str) -> str:
+    """Why a seller answered 402 to a paid request (settlement error or challenge error)."""
+    settlement = decode_payment_response(headers)
+    if settlement:
+        for key in ("errorReason", "errorMessage"):
+            if isinstance(settlement.get(key), str) and settlement[key]:
+                return str(settlement[key])
+    try:
+        challenge = parse_payment_required(headers, body)
+    except X402Error:
+        return "HTTP 402"
+    return challenge.error or "HTTP 402"
 
 
 def decode_payment_response(headers: Mapping[str, str]) -> dict[str, Any] | None:

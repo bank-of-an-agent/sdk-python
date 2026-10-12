@@ -16,6 +16,7 @@ from agentbank import (
     AgentBank,
     AgentBankError,
     APIConnectionError,
+    APIResponseValidationError,
     APITimeoutError,
     ConfigurationError,
     InternalServerError,
@@ -57,7 +58,7 @@ def test_environment_variables_configure_the_client(monkeypatch: pytest.MonkeyPa
         assert bank.config.api_key == API_KEY
         assert bank.session_id == SESSION_ID
         assert bank.account_id == ACCOUNT_ID
-        assert bank.chain_id == 84532
+        assert bank.chain_id is None  # resolved from GET /v1/meta when first needed
         assert API_KEY not in repr(bank)
         assert SESSION_KEY not in repr(bank)
         assert "api_key" in repr(bank)
@@ -108,7 +109,7 @@ def test_missing_credentials_fail_before_sending(api: respx.MockRouter) -> None:
 
 def test_principal_requests_use_bearer_tokens(principal: AgentBank, api: respx.MockRouter) -> None:
     route = api.get(f"/v1/agents/{AGENT_ID}").respond(json=example("Agent", id=AGENT_ID))
-    agent = principal.agents.get(AGENT_ID)
+    agent = principal.agents.retrieve(AGENT_ID)
     assert agent.id == AGENT_ID
     request = route.calls.last.request
     assert request.headers["authorization"] == f"Bearer {API_KEY}"
@@ -151,7 +152,7 @@ def test_operations_accepting_both_prefer_the_api_order(api: respx.MockRouter) -
     with AgentBank(
         api_key=API_KEY, session_id=SESSION_ID, session_key=SESSION_KEY, base_url=BASE_URL
     ) as both:
-        both.accounts.get(ACCOUNT_ID)  # x-agentbank-auth: [principal, agent]
+        both.accounts.retrieve(ACCOUNT_ID)  # x-agentbank-auth: [principal, agent]
         assert "authorization" in route.calls.last.request.headers
         preq = api.post("/v1/payment-requests").respond(201, json=example("PaymentRequest"))
         both.payment_requests.create(account_id=ACCOUNT_ID, amount="1.00")  # [agent, principal]
@@ -260,19 +261,35 @@ def test_retry_after_is_honored(
             httpx.Response(200, json=example("Org")),
         ]
     )
-    principal.orgs.me()
+    principal.orgs.retrieve()
     assert sleeps[0] == 2.0
     assert 25 <= sleeps[1] <= 30
 
 
 def test_retry_delay_bounds() -> None:
-    assert 0.375 <= retry_delay(0) <= 0.5
-    assert 6.0 <= retry_delay(10) <= 8.0
+    first, late = retry_delay(0), retry_delay(10)
+    assert first is not None
+    assert late is not None
+    assert 0.375 <= first <= 0.5
+    assert 6.0 <= late <= 8.0
     request = httpx.Request("GET", BASE_URL)
     too_long = httpx.Response(429, headers={"retry-after": "3600"}, request=request)
-    assert retry_delay(0, too_long) <= 0.5
+    assert retry_delay(0, too_long) is None  # never retry sooner than the server asked
     garbage = httpx.Response(429, headers={"retry-after": "soon"}, request=request)
-    assert retry_delay(1, garbage) <= 1.0
+    fallback = retry_delay(1, garbage)
+    assert fallback is not None
+    assert fallback <= 1.0
+    past = httpx.Response(503, headers={"retry-after": "-5"}, request=request)
+    assert retry_delay(0, past) is not None
+
+
+def test_long_retry_after_is_not_shortened(principal: AgentBank, api: respx.MockRouter) -> None:
+    route = api.get("/v1/orgs/me").respond(
+        429, headers={"retry-after": "120"}, json={"code": "rate_limited"}
+    )
+    with pytest.raises(RateLimitError):
+        principal.orgs.retrieve()
+    assert route.call_count == 1
 
 
 def test_unsafe_operations_are_not_retried_after_ambiguous_failures(
@@ -309,11 +326,11 @@ def test_connection_errors_and_rate_limits_are_always_retried(
 def test_retries_are_bounded(principal: AgentBank, api: respx.MockRouter) -> None:
     route = api.get("/v1/orgs/me").respond(503, json={"code": "screening_unavailable"})
     with pytest.raises(ServiceUnavailableError) as excinfo:
-        principal.orgs.me()
+        principal.orgs.retrieve()
     assert excinfo.value.code == "screening_unavailable"
     assert route.call_count == 3
     with pytest.raises(ServiceUnavailableError):
-        principal.orgs.me(request_options={"max_retries": 0})
+        principal.orgs.retrieve(request_options={"max_retries": 0})
     assert route.call_count == 4
     flaky = api.get("/v1/members").mock(side_effect=httpx.ReadTimeout("slow"))
     with pytest.raises(APITimeoutError):
@@ -378,7 +395,7 @@ def test_default_headers_and_custom_http_client(api: respx.MockRouter) -> None:
         http_client=http,
         timeout=httpx.Timeout(3.0),
     ) as bank:
-        bank.orgs.me()
+        bank.orgs.retrieve()
     assert route.calls.last.request.headers["x-team"] == "ops"
     assert not http.is_closed  # caller-owned clients are left open
     http.close()
@@ -398,16 +415,16 @@ def test_path_parameters_are_escaped_and_required(
     principal: AgentBank, api: respx.MockRouter
 ) -> None:
     route = api.get(url__regex=r"/v1/agents/.+").respond(json=example("Agent"))
-    principal.agents.get("agt_../../admin?x=1")
+    principal.agents.retrieve("agt_../../admin?x=1")
     assert route.calls.last.request.url.raw_path == b"/v1/agents/agt_..%2F..%2Fadmin%3Fx%3D1"
     with pytest.raises(ValueError, match="missing path parameter"):
-        principal.agents.get("")
+        principal.agents.retrieve("")
 
 
 def test_errors_carry_the_response(principal: AgentBank, api: respx.MockRouter) -> None:
     api.get("/v1/orgs/me").respond(401, json={"code": "unauthorized", "detail": "Bad key"})
     with pytest.raises(AgentBankError) as excinfo:
-        principal.orgs.me()
+        principal.orgs.retrieve()
     assert excinfo.value.status == 401
     assert excinfo.value.response is not None
     assert excinfo.value.response.status_code == 401
@@ -416,4 +433,47 @@ def test_errors_carry_the_response(principal: AgentBank, api: respx.MockRouter) 
 def test_rate_limit_error_after_exhaustion(principal: AgentBank, api: respx.MockRouter) -> None:
     api.get("/v1/orgs/me").respond(429, json={"code": "rate_limited"})
     with pytest.raises(RateLimitError):
-        principal.orgs.me()
+        principal.orgs.retrieve()
+
+
+def test_config_repr_hides_secrets() -> None:
+    with AgentBank(api_key=API_KEY, session_id=SESSION_ID, session_key=SESSION_KEY) as bank:
+        text = repr(bank.config)
+    assert API_KEY not in text
+    assert SESSION_KEY not in text
+    assert SESSION_KEY[2:] not in text
+    assert SESSION_ID in text
+
+
+@pytest.mark.parametrize("lifetime", [0, -1, 301])
+def test_signature_lifetime_is_validated_up_front(lifetime: int) -> None:
+    with pytest.raises(ConfigurationError, match="signature_lifetime_seconds"):
+        AgentBank(signature_lifetime_seconds=lifetime)
+
+
+def test_unexpected_success_bodies_raise_agent_bank_errors(
+    principal: AgentBank, api: respx.MockRouter
+) -> None:
+    api.get("/v1/orgs/me").mock(
+        side_effect=[
+            httpx.Response(200, json={"object": "org"}),
+            httpx.Response(200, text="<html>maintenance</html>"),
+        ]
+    )
+    with pytest.raises(APIResponseValidationError) as missing:
+        principal.orgs.retrieve()
+    assert missing.value.code == "invalid_response"
+    assert missing.value.status == 200
+    assert "Org" in missing.value.detail
+    with pytest.raises(APIResponseValidationError, match="not JSON"):
+        principal.orgs.retrieve()
+
+
+def test_policy_check_accepts_a_plain_amount(agent: AgentBank, api: respx.MockRouter) -> None:
+    route = api.post("/v1/policy/check").respond(json=example("PolicyDecision"))
+    agent.policies.check(intent={"kind": "transfer", "amount": "2.50", "to_agent_id": AGENT_ID})
+    body = json.loads(route.calls.last.request.content)
+    assert body["intent"]["amount"] == {"amount": "2.50", "asset": "USDC"}
+    with pytest.raises(AgentBankError) as bad:
+        agent.policies.check(intent={"amount": "2.5.0"})
+    assert bad.value.code == "invalid_amount"

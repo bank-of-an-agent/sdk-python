@@ -3,36 +3,32 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from typing import Any
 
 from agentbank.canonical import to_jsonable
-from agentbank.errors import ConfigurationError
-from agentbank.models import PaymentDestination, SigningRequest
+from agentbank.errors import AgentBankError, ConfigurationError, PaymentDeniedError
+from agentbank.models import Escrow, Payment, PaymentDestination, SigningRequest, Stream
 
 __all__ = [
     "TERMINAL_PAYMENT_STATUSES",
     "compact",
+    "denied_error",
     "destination",
+    "has_pending_signature",
+    "owner_signature_idempotency_key",
     "payee",
+    "pending_signing_request",
     "signature_idempotency_key",
-    "without_owner_authorization",
 ]
 
 #: Payment statuses after which nothing else will happen.
 TERMINAL_PAYMENT_STATUSES = frozenset({"settled", "denied", "failed", "canceled", "expired"})
 
-#: Payment statuses that are terminal failures.
-FAILED_PAYMENT_STATUSES = frozenset({"denied", "failed", "canceled", "expired"})
-
 
 def compact(**fields: Any) -> dict[str, Any]:
     """Build a JSON body from keyword arguments, dropping ``None`` (absent) values."""
     return {key: to_jsonable(value) for key, value in fields.items() if value is not None}
-
-
-def without_owner_authorization(body: Mapping[str, Any]) -> dict[str, Any]:
-    """The request body minus ``owner_authorization`` (the payload owners sign by default)."""
-    return {key: value for key, value in body.items() if key != "owner_authorization"}
 
 
 def _reference(value: str, kinds: Mapping[str, str], what: str) -> dict[str, str]:
@@ -71,8 +67,58 @@ def signature_idempotency_key(resource_id: str, signing_request: SigningRequest)
 
     Re-running a helper such as ``payments.pay`` after a crash resubmits the
     same signature under the same key, so the API returns the original result.
+    Same format as the TypeScript SDK: ``sig_<id>_<first 16 hex of the hash>``.
     """
-    return f"sig:{resource_id}:{signing_request.user_op_hash}"
+    return f"sig_{resource_id}_{signing_request.user_op_hash[2:18]}"
+
+
+def owner_signature_idempotency_key(operation_id: str, user_op_hash: str) -> str:
+    """Deterministic idempotency key for an owner-operation signature (as in the TS SDK)."""
+    return f"oop_sig_{operation_id}_{user_op_hash[2:18]}"
+
+
+def denied_error(payment: Payment) -> PaymentDeniedError:
+    """The error for a denied payment, listing the policy rules that denied it."""
+    hits = "; ".join(
+        f"{hit.rule}: {hit.detail}"
+        for hit in (payment.decision.rule_hits if payment.decision else [])
+        if hit.effect == "deny"
+    )
+    reason = hits or payment.failure_reason
+    suffix = f" ({reason})" if reason else ""
+    return PaymentDeniedError(f"Payment {payment.id} was denied{suffix}", resource=payment)
+
+
+def pending_signing_request(resource: Escrow | Stream) -> SigningRequest:
+    """The escrow or stream operation waiting for the session signature.
+
+    Only an operation with a ``pending_action`` and an unexpired
+    ``signing_request`` may be signed.
+
+    Raises:
+        AgentBankError: ``invalid_state`` when there is nothing (valid) to sign.
+    """
+    kind = resource.object
+    if resource.pending_action is None or resource.signing_request is None:
+        raise AgentBankError(
+            "invalid_state", f"{kind.capitalize()} {resource.id} has nothing to sign"
+        )
+    if resource.signing_request.expires_at <= datetime.now(timezone.utc):
+        raise AgentBankError(
+            "invalid_state",
+            f"The {resource.pending_action} operation of {kind} {resource.id} expired at "
+            f"{resource.signing_request.expires_at.isoformat()}",
+        )
+    return resource.signing_request
+
+
+def has_pending_signature(resource: Escrow | Stream) -> bool:
+    """Whether :func:`pending_signing_request` would return an operation to sign."""
+    return (
+        resource.pending_action is not None
+        and resource.signing_request is not None
+        and resource.signing_request.expires_at > datetime.now(timezone.utc)
+    )
 
 
 def require_session_for(signing_request: SigningRequest, session_id: str | None) -> str:

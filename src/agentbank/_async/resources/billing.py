@@ -24,9 +24,7 @@ class AsyncBilling(AsyncAPIResource):
             ops.LIST_PLANS, ListPlansResponse, request_options=request_options
         )
 
-    async def get_subscription(
-        self, *, request_options: RequestOptions | None = None
-    ) -> Subscription:
+    async def subscription(self, *, request_options: RequestOptions | None = None) -> Subscription:
         """Get the org's subscription."""
         return await self._request(
             ops.GET_SUBSCRIPTION, Subscription, request_options=request_options
@@ -48,7 +46,7 @@ class AsyncBilling(AsyncAPIResource):
             request_options=request_options,
         )
 
-    async def get_fees(
+    async def fees(
         self, *, period: str, request_options: RequestOptions | None = None
     ) -> FeeSummary:
         """Fees charged in a period (``YYYY-MM``), by kind."""

@@ -81,7 +81,7 @@ class Accounts(APIResource):
         ):
             yield from page.data
 
-    def get(
+    def retrieve(
         self, account_id: str | None = None, *, request_options: RequestOptions | None = None
     ) -> Account:
         """Get an account (defaults to the client's ``account_id``)."""

@@ -4,29 +4,36 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any, Literal
 
 from agentbank import _operations as ops
 from agentbank._base_client import RequestOptions, new_idempotency_key
 from agentbank._resource_helpers import (
-    FAILED_PAYMENT_STATUSES,
+    TERMINAL_PAYMENT_STATUSES,
     compact,
+    denied_error,
     destination,
     signature_idempotency_key,
 )
 from agentbank._sync.resources._base import APIResource
-from agentbank.errors import AgentBankError, PaymentError
+from agentbank.errors import (
+    AgentBankError,
+    BadRequestError,
+    PaymentError,
+    PaymentFailedError,
+)
 from agentbank.models import (
     ListPaymentsResponse,
+    Money,
     Payment,
     PaymentDestination,
     PaymentRequest,
     SigningRequest,
 )
-from agentbank.money import MoneyInput, coerce_money
+from agentbank.money import MoneyInput, coerce_money, parse_amount
 
-__all__ = ["PaymentRequests", "Payments"]
+__all__ = ["PaymentRequests", "Payments", "assert_payment_matches"]
 
 PaymentStatus = Literal[
     "requires_approval",
@@ -41,6 +48,63 @@ PaymentStatus = Literal[
 
 DEFAULT_SETTLEMENT_TIMEOUT = 120.0
 DEFAULT_POLL_INTERVAL = 2.0
+
+
+def assert_payment_matches(payment: Payment, amount: Money, to: Mapping[str, Any]) -> None:
+    """Refuse to sign a payment the API created differently from the request.
+
+    Checks the amount and, when the destination names them, the counterparty
+    address and agent (same check as the TypeScript SDK).
+
+    Raises:
+        BadRequestError: ``invalid_request`` listing the differences.
+    """
+    problems: list[str] = []
+    if parse_amount(payment.amount.amount) != parse_amount(amount.amount):
+        problems.append(f"amount {payment.amount.amount} != {amount.amount}")
+    address = to.get("address")
+    if isinstance(address, str) and payment.counterparty.address.lower() != address.lower():
+        problems.append("counterparty address differs")
+    agent_id = to.get("agent_id")
+    if (
+        isinstance(agent_id, str)
+        and payment.counterparty.agent_id is not None
+        and payment.counterparty.agent_id != agent_id
+    ):
+        problems.append("counterparty agent differs")
+    if problems:
+        raise BadRequestError(
+            "invalid_request",
+            f"Refusing to sign payment {payment.id}: it does not match the request "
+            f"({', '.join(problems)})",
+        )
+
+
+def _raise_if_unsuccessful(payment: Payment) -> None:
+    if payment.status == "denied":
+        raise denied_error(payment)
+    if payment.status == "failed":
+        reason = f": {payment.failure_reason}" if payment.failure_reason else ""
+        raise PaymentFailedError(f"Payment {payment.id} failed{reason}", resource=payment)
+    if payment.status in ("canceled", "expired"):
+        raise PaymentError(
+            f"payment_{payment.status}",
+            f"Payment {payment.id} is {payment.status}",
+            resource=payment,
+        )
+
+
+def _signing_request(payment: Payment) -> SigningRequest:
+    if payment.signing_request is not None:
+        return payment.signing_request
+    if payment.owner_operation_id is not None:
+        raise PaymentError(
+            "requires_owner",
+            f"Policy requires the owner key to sign payment {payment.id} "
+            f"(owner operation {payment.owner_operation_id})",
+            resource=payment,
+        )
+    raise AgentBankError("invalid_state", f"Payment {payment.id} has nothing to sign")
 
 
 class Payments(APIResource):
@@ -133,7 +197,9 @@ class Payments(APIResource):
         ):
             yield from page.data
 
-    def get(self, payment_id: str, *, request_options: RequestOptions | None = None) -> Payment:
+    def retrieve(
+        self, payment_id: str, *, request_options: RequestOptions | None = None
+    ) -> Payment:
         """Get a payment."""
         return self._request(
             ops.GET_PAYMENT,
@@ -185,7 +251,8 @@ class Payments(APIResource):
     def sign(self, payment: Payment) -> str:
         """Sign ``payment.signing_request.user_op_hash`` with the session key.
 
-        Returns the ``0x`` signature (EIP-191 personal sign of the hash bytes).
+        Returns the ``0x`` signature: EIP-191 personal sign over the **raw 32
+        bytes** of the hash, as the Smart Sessions validator verifies.
 
         Raises:
             AgentBankError: ``invalid_state`` if the payment has nothing to sign.
@@ -200,7 +267,12 @@ class Payments(APIResource):
     def sign_and_submit(
         self, payment: Payment, *, request_options: RequestOptions | None = None
     ) -> Payment:
-        """Sign the payment's signing request and submit it (idempotently)."""
+        """Sign the payment's signing request and submit it (idempotently).
+
+        Raises:
+            PaymentError: ``requires_owner`` when policy routed the payment to the
+                owner key (see ``owner_operation_id``).
+        """
         signing_request = _signing_request(payment)
         session_id, signature = self._client._sign_operation(signing_request)
         return self.submit_signature(
@@ -222,15 +294,18 @@ class Payments(APIResource):
         payment_request_id: str | None = None,
         metadata: Mapping[str, str] | None = None,
         idempotency_key: str | None = None,
+        wait_for_approval: bool = False,
         wait_for_settlement: bool = False,
         timeout: float = DEFAULT_SETTLEMENT_TIMEOUT,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         request_options: RequestOptions | None = None,
     ) -> Payment:
-        """Pay in one call: create, sign ``user_op_hash`` with the session key, submit.
+        """Pay in one call: create, check, sign ``user_op_hash`` with the session key, submit.
 
-        Safe to re-run with the same ``idempotency_key``: the API returns the
-        original payment and the signature is resubmitted under a deterministic key.
+        Before signing, the SDK checks that the API created the payment that was
+        asked for (amount and counterparty). Safe to re-run with the same
+        ``idempotency_key``: the API returns the original payment and the
+        signature is resubmitted under a deterministic key.
 
         Args:
             to: ``0x`` address, ``agt_`` agent id, ``acct_`` account id, or a mapping.
@@ -242,23 +317,31 @@ class Payments(APIResource):
             metadata: Up to 20 string key/value pairs.
             idempotency_key: Key for the payment; generated when omitted. Pass your
                 own to make retries of your task safe.
-            wait_for_settlement: Wait (through human approval, if policy asks for
-                it) until the payment settles on-chain.
-            timeout: Seconds to wait when ``wait_for_settlement`` is true.
+            wait_for_approval: If policy queues the payment for a human approver,
+                wait for the decision (then sign) instead of returning it as
+                ``requires_approval``.
+            wait_for_settlement: Wait until the payment settles on-chain.
+            timeout: Seconds to wait in total when waiting.
             poll_interval: Seconds between status checks.
             request_options: Per-request overrides.
 
         Returns:
             The payment: ``submitted`` (or ``requires_approval``) without waiting,
-            ``settled`` when waiting.
+            ``settled`` when waiting for settlement.
 
         Raises:
-            PaymentError: The payment was denied, failed, canceled or expired,
-                needs the owner key (``requires_owner``), or did not settle in time.
+            PaymentDeniedError: Denied by policy or by the co-signer
+                (also a :class:`~agentbank.PolicyDeniedError`).
+            PaymentFailedError: Failed on-chain.
+            PaymentError: Canceled, expired, needs the owner key
+                (``requires_owner``), or still pending at the timeout.
+            BadRequestError: The created payment does not match the request.
         """
+        money = coerce_money(amount)
+        target = destination(to)
         payment = self.create(
-            amount=amount,
-            to=to,
+            amount=money,
+            to=target,
             account_id=account_id,
             memo=memo,
             mandate_id=mandate_id,
@@ -267,13 +350,70 @@ class Payments(APIResource):
             idempotency_key=idempotency_key or new_idempotency_key(),
             request_options=request_options,
         )
-        return self._drive(
+        assert_payment_matches(payment, money, target)
+        return self.complete(
             payment,
-            wait=wait_for_settlement,
+            wait_for_approval=wait_for_approval,
+            wait_for_settlement=wait_for_settlement,
             timeout=timeout,
             poll_interval=poll_interval,
             request_options=request_options,
         )
+
+    def complete(
+        self,
+        payment: Payment | str,
+        *,
+        wait_for_approval: bool = False,
+        wait_for_settlement: bool = False,
+        timeout: float = DEFAULT_SETTLEMENT_TIMEOUT,
+        poll_interval: float = DEFAULT_POLL_INTERVAL,
+        request_options: RequestOptions | None = None,
+    ) -> Payment:
+        """Drive an existing payment to completion; safe to call again on the same payment.
+
+        Optionally waits for a human approval, signs and submits when the payment
+        ``requires_signature``, then optionally waits for settlement.
+
+        Raises:
+            PaymentDeniedError: Denied by policy or by the co-signer.
+            PaymentFailedError: Failed on-chain.
+            PaymentError: Canceled, expired, ``requires_owner`` or ``settlement_timeout``.
+        """
+        current = (
+            payment
+            if isinstance(payment, Payment)
+            else self.retrieve(payment, request_options=request_options)
+        )
+        deadline = self._client._monotonic() + timeout
+        if current.status == "requires_approval" and wait_for_approval:
+            current = self._poll(
+                current.id,
+                lambda p: p.status != "requires_approval",
+                deadline=deadline,
+                timeout=timeout,
+                poll_interval=poll_interval,
+                request_options=request_options,
+            )
+        _raise_if_unsuccessful(current)
+        if current.status == "requires_signature":
+            current = self.sign_and_submit(current, request_options=request_options)
+            _raise_if_unsuccessful(current)
+        if (
+            wait_for_settlement
+            and current.status not in TERMINAL_PAYMENT_STATUSES
+            and current.status != "requires_approval"
+        ):
+            current = self._poll(
+                current.id,
+                lambda p: p.status in TERMINAL_PAYMENT_STATUSES,
+                deadline=deadline,
+                timeout=timeout,
+                poll_interval=poll_interval,
+                request_options=request_options,
+            )
+        _raise_if_unsuccessful(current)
+        return current
 
     def wait_for_settlement(
         self,
@@ -283,73 +423,47 @@ class Payments(APIResource):
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         request_options: RequestOptions | None = None,
     ) -> Payment:
-        """Drive a payment to settlement, signing it if it (again) needs the session key.
-
-        Polls through ``requires_approval`` and ``submitted`` until ``settled``.
+        """Poll a payment until it settles (it does not sign; see :meth:`complete`).
 
         Raises:
-            PaymentError: Terminal failure, ``requires_owner``, or ``settlement_timeout``.
+            PaymentDeniedError: Denied by policy or by the co-signer.
+            PaymentFailedError: Failed on-chain.
+            PaymentError: Canceled, expired, or still pending at the timeout
+                (``settlement_timeout``).
         """
-        if isinstance(payment, str):
-            payment = self.get(payment, request_options=request_options)
-        return self._drive(
-            payment,
-            wait=True,
+        payment_id = payment.id if isinstance(payment, Payment) else payment
+        settled = self._poll(
+            payment_id,
+            lambda p: p.status in TERMINAL_PAYMENT_STATUSES,
+            deadline=self._client._monotonic() + timeout,
             timeout=timeout,
             poll_interval=poll_interval,
             request_options=request_options,
         )
+        _raise_if_unsuccessful(settled)
+        return settled
 
-    def _drive(
+    def _poll(
         self,
-        payment: Payment,
+        payment_id: str,
+        done: Callable[[Payment], bool],
         *,
-        wait: bool,
+        deadline: float,
         timeout: float,
         poll_interval: float,
         request_options: RequestOptions | None,
     ) -> Payment:
-        deadline = self._client._monotonic() + timeout
-        submitted: set[str] = set()  # user operation hashes already signed and submitted
         while True:
-            if payment.status in FAILED_PAYMENT_STATUSES:
-                reason = f": {payment.failure_reason}" if payment.failure_reason else ""
-                raise PaymentError(
-                    f"payment_{payment.status}",
-                    f"Payment {payment.id} is {payment.status}{reason}",
-                    payment=payment,
-                )
-            if payment.status == "settled":
-                return payment
-            pending_hash = payment.signing_request.user_op_hash if payment.signing_request else None
-            if payment.status == "requires_signature" and pending_hash not in submitted:
-                if pending_hash is not None:
-                    submitted.add(pending_hash)
-                payment = self.sign_and_submit(payment, request_options=request_options)
-                continue
-            if not wait:
-                return payment
+            current = self.retrieve(payment_id, request_options=request_options)
+            if done(current):
+                return current
             if self._client._monotonic() >= deadline:
                 raise PaymentError(
                     "settlement_timeout",
-                    f"Payment {payment.id} is still {payment.status} after {timeout:g}s",
-                    payment=payment,
+                    f"Payment {current.id} is still {current.status} after {timeout:g}s",
+                    resource=current,
                 )
             self._client._sleep(poll_interval)
-            payment = self.get(payment.id, request_options=request_options)
-
-
-def _signing_request(payment: Payment) -> SigningRequest:
-    if payment.signing_request is not None:
-        return payment.signing_request
-    if payment.owner_operation_id is not None:
-        raise PaymentError(
-            "requires_owner",
-            f"Policy requires the owner key to sign payment {payment.id} "
-            f"(owner operation {payment.owner_operation_id})",
-            payment=payment,
-        )
-    raise AgentBankError("invalid_state", f"Payment {payment.id} has nothing to sign")
 
 
 class PaymentRequests(APIResource):
@@ -392,7 +506,7 @@ class PaymentRequests(APIResource):
             request_options=request_options,
         )
 
-    def get(
+    def retrieve(
         self, payment_request_id: str, *, request_options: RequestOptions | None = None
     ) -> PaymentRequest:
         """Get a payment request."""

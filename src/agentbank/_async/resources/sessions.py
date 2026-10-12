@@ -6,9 +6,9 @@ from collections.abc import Mapping
 from typing import Any
 
 from agentbank import _operations as ops
+from agentbank import owner_payloads
 from agentbank._async.resources._base import AsyncAPIResource
 from agentbank._base_client import RequestOptions
-from agentbank._resource_helpers import compact
 from agentbank.keys import SessionKey, SignerLike
 from agentbank.models import Session, SessionScope
 
@@ -31,28 +31,32 @@ class AsyncSessions(AsyncAPIResource):
     ) -> Session:
         """Register a session key and its on-chain scope.
 
-        The owner authorizes the grant with an EIP-712 ``session.grant`` over
-        ``{account_id, public_key, scope}`` (subject = ``account_id``). Then call
-        :meth:`install` and have the owner sign the returned owner operation.
+        The owner authorizes the grant with an EIP-712 ``session.grant``
+        (subject = ``account_id``) over ``{account_id, public_key, scope}`` with
+        the scope's defaults made explicit (see
+        :func:`agentbank.owner_payloads.session_grant`, which builds exactly the
+        body sent here). Then call :meth:`install` and have the owner sign the
+        returned owner operation.
 
         Args:
             account_id: The agent's account.
             public_key: The session key *address* (from :func:`agentbank.generate_session_key`).
             scope: ``max_per_tx``, ``max_per_day``, ``expires_at`` and optional
-                ``allowed_recipients``/``allowed_contracts`` (enforced on-chain).
-            owner_authorization: A pre-signed ``session.grant`` authorization over
-                exactly ``{"account_id", "public_key", "scope"}`` as sent.
-            owner: Alternatively, the owner key; the SDK builds and signs the grant.
+                ``asset``, ``allowed_recipients``, ``allowed_contracts`` (enforced on-chain).
+            owner_authorization: A pre-signed ``session.grant`` authorization.
+            owner: Alternatively, the owner key; the SDK signs the grant in the
+                deployment's EIP-712 domain (chain id from ``GET /v1/meta``).
             idempotency_key: Optional key; generated when omitted.
             request_options: Per-request overrides.
         """
-        body = compact(account_id=account_id, public_key=public_key, scope=scope)
+        grant = owner_payloads.session_grant(
+            account_id=account_id, public_key=public_key, scope=scope
+        )
+        body: dict[str, Any] = dict(grant.payload)
         if owner_authorization is not None:
             body["owner_authorization"] = owner_authorization
         elif owner is not None:
-            body["owner_authorization"] = self._owner_authorization(
-                owner, "session.grant", account_id, dict(body)
-            )
+            body["owner_authorization"] = await self._owner_authorization(owner, grant)
         return await self._request(
             ops.CREATE_SESSION,
             Session,
@@ -61,7 +65,7 @@ class AsyncSessions(AsyncAPIResource):
             request_options=request_options,
         )
 
-    async def get(
+    async def retrieve(
         self, session_id: str, *, request_options: RequestOptions | None = None
     ) -> Session:
         """Get a session (principal, or the agent holding it)."""

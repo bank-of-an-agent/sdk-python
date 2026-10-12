@@ -281,10 +281,10 @@ EVM address
 """
 
 
-AgentId = TypeAliasType("AgentId", Annotated[str, Field(min_length=1)])
+AgentId = TypeAliasType("AgentId", Annotated[str, Field(pattern="^agt_[0-9A-HJKMNP-TV-Z]{26}$")])
 
 
-Erc8004Id = TypeAliasType("Erc8004Id", Annotated[str, Field(min_length=1)])
+Erc8004Id = TypeAliasType("Erc8004Id", Annotated[str, Field(pattern="^[\\x21-\\x7E]{1,200}$")])
 
 
 class CounterpartyDenyList(AgentBankModel):
@@ -312,8 +312,8 @@ class CounterpartyMatch(AgentBankModel):
     """
     EVM address
     """
-    agent_id: str | None = None
-    erc8004_id: str | None = None
+    agent_id: Annotated[str | None, Field(pattern="^agt_[0-9A-HJKMNP-TV-Z]{26}$")] = None
+    erc8004_id: Annotated[str | None, Field(pattern="^[\\x21-\\x7E]{1,200}$")] = None
     x402_domain: Annotated[
         str | None,
         Field(
@@ -387,7 +387,7 @@ class TimeWindow(AgentBankModel):
         Field(min_length=1),
     ]
     start: Annotated[str, Field(pattern="^([01][0-9]|2[0-3]):[0-5][0-9]$")]
-    end: Annotated[str, Field(pattern="^([01][0-9]|2[0-4]):[0-5][0-9]$")]
+    end: Annotated[str, Field(pattern="^(([01][0-9]|2[0-3]):[0-5][0-9]|24:00)$")]
     timezone: Annotated[str, Field(min_length=1)] = "UTC"
 
 
@@ -485,7 +485,7 @@ class PolicyDocument(AgentBankModel):
         ),
     ]
     velocity: Annotated[PolicyVelocity | None, Field(title="PolicyVelocity")] = None
-    time_windows: Annotated[list[TimeWindow] | None, Field(max_length=20)] = None
+    time_windows: Annotated[list[TimeWindow] | None, Field(max_length=20, min_length=1)] = None
     max_balance: Annotated[
         str | None,
         Field(examples=["25.00"], pattern="^(0|[1-9][0-9]{0,17})(\\.[0-9]{1,6})?$"),
@@ -501,9 +501,10 @@ class PolicyDocument(AgentBankModel):
     """
     Decimal string in major units, e.g. "25.00". Never a JSON number.
     """
-    allowed_kinds: (
-        list[Literal["transfer", "x402", "escrow", "stream", "payout", "refill"]] | None
-    ) = None
+    allowed_kinds: Annotated[
+        list[Literal["transfer", "x402", "escrow", "stream", "payout", "refill"]] | None,
+        Field(min_length=1),
+    ] = None
     auto_save: Annotated[AutoSave | None, Field(title="AutoSave")] = None
 
 
@@ -529,6 +530,10 @@ class PolicyDecision(AgentBankModel):
     evaluated_at: AwareDatetime
     """
     ISO 8601 timestamp
+    """
+    retry_at: AwareDatetime | None = None
+    """
+    When a time-based denial (cooling period, time window) lifts
     """
 
 
@@ -958,7 +963,7 @@ class OwnerOperation(AgentBankModel):
     status: Literal["requires_signature", "submitted", "succeeded", "failed", "expired"]
     user_op_hash: Annotated[str, Field(pattern="^0x[a-fA-F0-9]{64}$")]
     """
-    Sign this hash with the owner key (EIP-191 personal sign)
+    Sign the raw 32 bytes of this hash with the owner key (EIP-191 personal sign)
     """
     chain_id: Annotated[int, Field(ge=-9007199254740991, le=9007199254740991)]
     tx_hash: Annotated[str | None, Field(pattern="^0x[a-fA-F0-9]{64}$")]
@@ -1160,6 +1165,16 @@ class PaymentIntent(AgentBankModel):
     """
     Lowercase hostname, e.g. api.example-data.com
     """
+    contract: Annotated[
+        str | None,
+        Field(
+            examples=["0x1111111111111111111111111111111111111111"],
+            pattern="^0x[a-fA-F0-9]{40}$",
+        ),
+    ] = None
+    """
+    Contract the payment interacts with (escrow, streams), for session allowed_contracts
+    """
     mandate_id: Annotated[str | None, Field(pattern="^mdt_[0-9A-HJKMNP-TV-Z]{26}$")] = None
 
 
@@ -1205,7 +1220,7 @@ class SigningRequest(AgentBankModel):
     session_id: Annotated[str | None, Field(pattern="^ses_[0-9A-HJKMNP-TV-Z]{26}$")]
     user_op_hash: Annotated[str, Field(pattern="^0x[a-fA-F0-9]{64}$")]
     """
-    Sign this hash with the session key (EIP-191 personal sign)
+    Sign the raw 32 bytes of this hash with the session key (EIP-191 personal sign)
     """
     chain_id: Annotated[int, Field(ge=-9007199254740991, le=9007199254740991)]
     expires_at: AwareDatetime
@@ -1589,6 +1604,10 @@ class Escrow(AgentBankModel):
     """
     ISO 8601 timestamp
     """
+    pending_action: Literal["lock", "release", "refund", "dispute"] | None
+    """
+    On-chain action waiting for the session signature, if any
+    """
     signing_request: SigningRequest | None
     memo: str | None
     created_at: AwareDatetime
@@ -1686,6 +1705,10 @@ class Stream(AgentBankModel):
     EVM address
     """
     onchain_id: str | None
+    pending_action: Literal["create", "cancel", "top_up"] | None
+    """
+    On-chain action waiting for the session signature, if any
+    """
     signing_request: SigningRequest | None
     created_at: AwareDatetime
     """
@@ -2269,6 +2292,80 @@ class RevenueReport(AgentBankModel):
     """
 
 
+class MetaUsdc(AgentBankModel):
+    address: Annotated[
+        str,
+        Field(
+            examples=["0x1111111111111111111111111111111111111111"],
+            pattern="^0x[a-fA-F0-9]{40}$",
+        ),
+    ]
+    """
+    EVM address
+    """
+    decimals: Annotated[int, Field(ge=-9007199254740991, le=9007199254740991)]
+    eip712_name: str
+    eip712_version: str
+
+
+ContractsAdditionalProperty = TypeAliasType(
+    "ContractsAdditionalProperty",
+    Annotated[
+        str,
+        Field(
+            examples=["0x1111111111111111111111111111111111111111"],
+            pattern="^0x[a-fA-F0-9]{40}$",
+        ),
+    ],
+)
+"""
+EVM address
+"""
+
+
+class Meta(AgentBankModel):
+    """
+    Deployment facts clients need: chain, USDC, contract addresses, feature flags.
+    """
+
+    object: Literal["meta"]
+    api_version: str
+    chain: Literal["base-sepolia", "anvil", "simulated"]
+    chain_id: Annotated[int, Field(ge=-9007199254740991, le=9007199254740991)]
+    caip2: str
+    owner_authorization_chain_id: Annotated[int, Field(ge=-9007199254740991, le=9007199254740991)]
+    """
+    EIP-712 domain chain id to use for OwnerAuthorization signatures
+    """
+    usdc: Annotated[MetaUsdc, Field(title="MetaUsdc")]
+    contracts: dict[str, ContractsAdditionalProperty]
+    """
+    Agent Bank contract addresses on this chain
+    """
+    cosigner_address: Annotated[
+        str | None,
+        Field(
+            examples=["0x1111111111111111111111111111111111111111"],
+            pattern="^0x[a-fA-F0-9]{40}$",
+        ),
+    ]
+    """
+    EVM address
+    """
+    revenue_address: Annotated[
+        str | None,
+        Field(
+            examples=["0x1111111111111111111111111111111111111111"],
+            pattern="^0x[a-fA-F0-9]{40}$",
+        ),
+    ]
+    """
+    EVM address
+    """
+    facilitator_url: str | None
+    features: dict[str, bool]
+
+
 class Problem(AgentBankModel):
     """
     RFC 9457 problem details
@@ -2375,6 +2472,7 @@ __all__ = [
     "BudgetConstraint",
     "ByKindAdditionalProperty",
     "ChangePlanRequest",
+    "ContractsAdditionalProperty",
     "Counterparty",
     "CounterpartyCap",
     "CounterpartyDenyList",
@@ -2434,6 +2532,8 @@ __all__ = [
     "Mandate",
     "MandatePayee",
     "Member",
+    "Meta",
+    "MetaUsdc",
     "MetadataAdditionalProperty",
     "MinorUnitsInt",
     "MinorUnitsString",

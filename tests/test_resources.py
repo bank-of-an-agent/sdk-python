@@ -89,7 +89,7 @@ CASES: list[Case] = [
             owner_address=OWNER_ADDRESS,
         ),
     ),
-    Case("getCurrentOrg", "principal", lambda c: c.orgs.me()),
+    Case("getCurrentOrg", "principal", lambda c: c.orgs.retrieve()),
     Case("startKyb", "principal", lambda c: c.orgs.start_kyb()),
     Case("freezeOrg", "principal", lambda c: c.orgs.freeze(reason="incident")),
     Case(
@@ -102,13 +102,13 @@ CASES: list[Case] = [
     Case(
         "setTreasury",
         "principal",
-        lambda c: c.treasury.set_account(account_id=ACCOUNT_ID, owner_authorization=AUTH),
+        lambda c: c.treasury.set(account_id=ACCOUNT_ID, owner_authorization=AUTH),
     ),
     Case("getAutoTopUp", "agent", lambda c: c.treasury.get_auto_topup(AGENT_ID), AGENT_ID),
     Case(
         "putAutoTopUp",
         "principal",
-        lambda c: c.treasury.set_auto_topup(
+        lambda c: c.treasury.put_auto_topup(
             AGENT_ID,
             refill_to="50.00",
             when_below="10.00",
@@ -121,7 +121,7 @@ CASES: list[Case] = [
     Case(
         "putSweepRule",
         "principal",
-        lambda c: c.treasury.set_sweep_rule(
+        lambda c: c.treasury.put_sweep_rule(
             ACCOUNT_ID,
             fund_id=id_for("fnd"),
             threshold="1000.00",
@@ -144,7 +144,7 @@ CASES: list[Case] = [
         lambda c: c.agents.create(name="bot", description="d", metadata={"team": "ops"}),
     ),
     Case("listAgents", "principal", lambda c: c.agents.list(status="active")),
-    Case("getAgent", "agent", lambda c: c.agents.get(AGENT_ID), AGENT_ID),
+    Case("getAgent", "agent", lambda c: c.agents.retrieve(AGENT_ID), AGENT_ID),
     Case("freezeAgent", "principal", lambda c: c.agents.freeze(AGENT_ID, reason="x"), AGENT_ID),
     Case(
         "unfreezeAgent",
@@ -159,7 +159,7 @@ CASES: list[Case] = [
         AGENT_ID,
     ),
     Case("listAccounts", "agent", lambda c: c.accounts.list(agent_id=AGENT_ID)),
-    Case("getAccount", "agent", lambda c: c.accounts.get(), ACCOUNT_ID),
+    Case("getAccount", "agent", lambda c: c.accounts.retrieve(), ACCOUNT_ID),
     Case("getBalances", "agent", lambda c: c.accounts.balances(), ACCOUNT_ID),
     # sessions and owner operations
     Case(
@@ -172,10 +172,10 @@ CASES: list[Case] = [
             owner_authorization=AUTH,
         ),
     ),
-    Case("getSession", "agent", lambda c: c.sessions.get(SESSION_ID), SESSION_ID),
+    Case("getSession", "agent", lambda c: c.sessions.retrieve(SESSION_ID), SESSION_ID),
     Case("revokeSession", "principal", lambda c: c.sessions.revoke(SESSION_ID), SESSION_ID),
     Case("installSession", "principal", lambda c: c.sessions.install(SESSION_ID), SESSION_ID),
-    Case("getOwnerOperation", "principal", lambda c: c.owner_operations.get(OOP_ID), OOP_ID),
+    Case("getOwnerOperation", "principal", lambda c: c.owner_operations.retrieve(OOP_ID), OOP_ID),
     Case(
         "submitOwnerSignature",
         "principal",
@@ -188,13 +188,13 @@ CASES: list[Case] = [
         "principal",
         lambda c: c.mandates.create(agent_id=AGENT_ID, mandate=MANDATE, owner_authorization=AUTH),
     ),
-    Case("getMandate", "agent", lambda c: c.mandates.get(MDT_ID), MDT_ID),
+    Case("getMandate", "agent", lambda c: c.mandates.retrieve(MDT_ID), MDT_ID),
     Case("revokeMandate", "principal", lambda c: c.mandates.revoke(MDT_ID), MDT_ID),
-    Case("getPolicy", "agent", lambda c: c.policies.get(AGENT_ID), AGENT_ID),
+    Case("getPolicy", "agent", lambda c: c.policies.retrieve(AGENT_ID), AGENT_ID),
     Case(
         "putPolicy",
         "principal",
-        lambda c: c.policies.update(AGENT_ID, policy={"limits": {"per_day": "5.00"}}),
+        lambda c: c.policies.put(AGENT_ID, policy={"limits": {"per_day": "5.00"}}),
         AGENT_ID,
     ),
     Case(
@@ -207,7 +207,7 @@ CASES: list[Case] = [
     # payments
     Case("createPayment", "agent", lambda c: c.payments.create(amount="1.00", to=AGENT_ID)),
     Case("listPayments", "agent", lambda c: c.payments.list(status="settled")),
-    Case("getPayment", "agent", lambda c: c.payments.get(PAY_ID), PAY_ID),
+    Case("getPayment", "agent", lambda c: c.payments.retrieve(PAY_ID), PAY_ID),
     Case(
         "submitPaymentSignature",
         "agent",
@@ -220,7 +220,7 @@ CASES: list[Case] = [
         "agent",
         lambda c: c.payment_requests.create(amount="2.00", reference="inv-1"),
     ),
-    Case("getPaymentRequest", "agent", lambda c: c.payment_requests.get(PREQ_ID), PREQ_ID),
+    Case("getPaymentRequest", "agent", lambda c: c.payment_requests.retrieve(PREQ_ID), PREQ_ID),
     # x402
     Case(
         "x402Pay",
@@ -253,7 +253,7 @@ CASES: list[Case] = [
             payee=OWNER_ADDRESS, amount="5.00", expires_at=EXPIRES, terms="deliver a report"
         ),
     ),
-    Case("getEscrow", "agent", lambda c: c.escrows.get(ESC_ID), ESC_ID),
+    Case("getEscrow", "agent", lambda c: c.escrows.retrieve(ESC_ID), ESC_ID),
     Case(
         "submitEscrowSignature",
         "agent",
@@ -271,7 +271,7 @@ CASES: list[Case] = [
             payee=AGENT_ID, amount_per_interval="0.01", interval_seconds=1, deposit="10.00"
         ),
     ),
-    Case("getStream", "agent", lambda c: c.streams.get(STR_ID), STR_ID),
+    Case("getStream", "agent", lambda c: c.streams.retrieve(STR_ID), STR_ID),
     Case(
         "submitStreamSignature",
         "agent",
@@ -281,10 +281,10 @@ CASES: list[Case] = [
     Case("cancelStream", "agent", lambda c: c.streams.cancel(STR_ID), STR_ID),
     # approvals
     Case("listApprovals", "principal", lambda c: c.approvals.list(status="pending")),
-    Case("getApproval", "principal", lambda c: c.approvals.get(APR_ID), APR_ID),
+    Case("getApproval", "principal", lambda c: c.approvals.retrieve(APR_ID), APR_ID),
     Case("decideApproval", "principal", lambda c: c.approvals.approve(APR_ID), APR_ID),
     # ledger
-    Case("listEntries", "agent", lambda c: c.ledger.entries(limit=2), ACCOUNT_ID),
+    Case("listEntries", "agent", lambda c: c.ledger.list_entries(limit=2), ACCOUNT_ID),
     Case("getStatement", "agent", lambda c: c.ledger.statement(period="2026-10")),
     # vaults
     Case(
@@ -293,7 +293,7 @@ CASES: list[Case] = [
         lambda c: c.vaults.create(kind="locked", name="taxes", target="100.00", unlock_at=EXPIRES),
     ),
     Case("listVaults", "agent", lambda c: c.vaults.list(account_id=ACCOUNT_ID)),
-    Case("getVault", "agent", lambda c: c.vaults.get(VLT_ID), VLT_ID),
+    Case("getVault", "agent", lambda c: c.vaults.retrieve(VLT_ID), VLT_ID),
     Case("depositVault", "agent", lambda c: c.vaults.deposit(VLT_ID, amount="1.00"), VLT_ID),
     Case("withdrawVault", "principal", lambda c: c.vaults.withdraw(VLT_ID, amount="1.00"), VLT_ID),
     # webhooks
@@ -311,10 +311,11 @@ CASES: list[Case] = [
     Case("listEvents", "principal", lambda c: c.webhooks.list_events(type="payment.settled")),
     # billing and meta
     Case("listPlans", "principal", lambda c: c.billing.list_plans()),
-    Case("getSubscription", "principal", lambda c: c.billing.get_subscription()),
+    Case("getSubscription", "principal", lambda c: c.billing.subscription()),
     Case("changePlan", "principal", lambda c: c.billing.change_plan(plan="pro")),
-    Case("getFees", "principal", lambda c: c.billing.get_fees(period="2026-10")),
+    Case("getFees", "principal", lambda c: c.billing.fees(period="2026-10")),
     Case("health", "principal", lambda c: c.health()),
+    Case("getMeta", "principal", lambda c: c.meta()),
 ]
 
 #: Operations deliberately without a typed method (reachable through ``client.call``).
@@ -423,7 +424,13 @@ ITERATORS: list[tuple[str, str, Kind, Callable[[Any], Any], str | None]] = [
     ("listAccounts", "ListAccountsResponse", "agent", lambda c: c.accounts.list_all(), None),
     ("listPayments", "ListPaymentsResponse", "agent", lambda c: c.payments.list_all(), None),
     ("listApprovals", "ListApprovalsResponse", "principal", lambda c: c.approvals.list_all(), None),
-    ("listEntries", "ListEntriesResponse", "agent", lambda c: c.ledger.entries_all(), ACCOUNT_ID),
+    (
+        "listEntries",
+        "ListEntriesResponse",
+        "agent",
+        lambda c: c.ledger.list_entries_all(),
+        ACCOUNT_ID,
+    ),
     ("listVaults", "ListVaultsResponse", "agent", lambda c: c.vaults.list_all(), None),
     (
         "listWebhookEndpoints",

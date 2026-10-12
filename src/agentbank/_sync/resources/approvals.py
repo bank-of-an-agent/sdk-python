@@ -53,7 +53,9 @@ class Approvals(APIResource):
         ):
             yield from page.data
 
-    def get(self, approval_id: str, *, request_options: RequestOptions | None = None) -> Approval:
+    def retrieve(
+        self, approval_id: str, *, request_options: RequestOptions | None = None
+    ) -> Approval:
         """Get an approval."""
         return self._request(
             ops.GET_APPROVAL,

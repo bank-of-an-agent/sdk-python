@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from decimal import Decimal
 from typing import Any
 
@@ -26,6 +26,7 @@ from agentbank.models import (
     X402SupportedResponse,
     X402VerifyResponse,
 )
+from agentbank.x402 import DEFAULT_MAX_AMOUNT_PER_REQUEST, DEFAULT_X402_NETWORK, X402Receipt
 
 __all__ = ["X402"]
 
@@ -57,8 +58,10 @@ class X402(APIResource):
             request_options: Per-request overrides.
 
         Returns:
-            The x402 payment and, when policy allows, the authorization for the
-            spend key to sign (``authorization`` is ``None`` otherwise).
+            The x402 payment (``requires_signature``) and the EIP-3009
+            authorization for the spend key to sign. A payment outside policy is
+            denied (``payment.status == "denied"``, no authorization); x402
+            payments never wait for human approval.
         """
         body = compact(
             account_id=self._account(account_id),
@@ -82,7 +85,7 @@ class X402(APIResource):
         x402_version: int = 2,
         request_options: RequestOptions | None = None,
     ) -> X402VerifyResponse:
-        """Facilitator: verify a payment payload against requirements (sellers)."""
+        """Facilitator (public): verify a payment payload against requirements (sellers)."""
         body = {
             "x402Version": x402_version,
             "paymentPayload": payment_payload,
@@ -100,7 +103,7 @@ class X402(APIResource):
         x402_version: int = 2,
         request_options: RequestOptions | None = None,
     ) -> X402SettleResponse:
-        """Facilitator: settle a verified payment on-chain (sellers).
+        """Facilitator (public): settle a verified payment on-chain (sellers).
 
         Not retried after an ambiguous failure: the facilitator treats each
         authorization as single-use, so check the outcome before settling again.
@@ -140,11 +143,13 @@ class X402(APIResource):
     def transport(
         self,
         *,
-        max_amount: str | Decimal,
+        max_amount: str | Decimal = DEFAULT_MAX_AMOUNT_PER_REQUEST,
+        network: str = DEFAULT_X402_NETWORK,
         spend_key: SignerLike | SessionKey | None = None,
         account_id: str | None = None,
         mandate_id: str | None = None,
         allowed_domains: Collection[str] | None = None,
+        on_payment: Callable[[X402Receipt], None] | None = None,
         transport: httpx.BaseTransport | None = None,
     ) -> X402Transport:
         """Build an x402-paying ``httpx`` transport bound to this client.
@@ -154,21 +159,25 @@ class X402(APIResource):
         return X402Transport(
             self._client,
             max_amount=max_amount,
+            network=network,
             spend_key=spend_key,
             account_id=account_id,
             mandate_id=mandate_id,
             allowed_domains=allowed_domains,
+            on_payment=on_payment,
             transport=transport,
         )
 
     def client(
         self,
         *,
-        max_amount: str | Decimal,
+        max_amount: str | Decimal = DEFAULT_MAX_AMOUNT_PER_REQUEST,
+        network: str = DEFAULT_X402_NETWORK,
         spend_key: SignerLike | SessionKey | None = None,
         account_id: str | None = None,
         mandate_id: str | None = None,
         allowed_domains: Collection[str] | None = None,
+        on_payment: Callable[[X402Receipt], None] | None = None,
         transport: httpx.BaseTransport | None = None,
         **httpx_options: Any,
     ) -> httpx.Client:
@@ -178,10 +187,12 @@ class X402(APIResource):
         """
         x402_transport = self.transport(
             max_amount=max_amount,
+            network=network,
             spend_key=spend_key,
             account_id=account_id,
             mandate_id=mandate_id,
             allowed_domains=allowed_domains,
+            on_payment=on_payment,
             transport=transport,
         )
         return httpx.Client(transport=x402_transport, **httpx_options)
@@ -190,11 +201,12 @@ class X402(APIResource):
         self,
         url: str,
         *,
-        max_amount: str | Decimal,
+        max_amount: str | Decimal = DEFAULT_MAX_AMOUNT_PER_REQUEST,
         method: str = "GET",
         headers: Mapping[str, str] | None = None,
         content: bytes | str | None = None,
         json: Any = None,
+        network: str = DEFAULT_X402_NETWORK,
         spend_key: SignerLike | SessionKey | None = None,
         account_id: str | None = None,
         mandate_id: str | None = None,
@@ -208,6 +220,7 @@ class X402(APIResource):
         """
         with self.client(
             max_amount=max_amount,
+            network=network,
             spend_key=spend_key,
             account_id=account_id,
             mandate_id=mandate_id,

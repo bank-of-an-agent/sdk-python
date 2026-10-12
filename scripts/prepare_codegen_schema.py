@@ -67,6 +67,7 @@ INLINE_TITLES: dict[str, str] = {
     "Approval/properties/decisions/items": "ApprovalDecision",
     "Statement/properties/lines/items": "StatementLine",
     "Fund/properties/eligibility": "FundEligibility",
+    "Meta/properties/usdc": "MetaUsdc",
 }
 
 PRIMITIVES = {"string", "integer", "boolean"}
@@ -90,6 +91,8 @@ def _flatten_nullable_primitive(node: dict[str, Any]) -> None:
     inner = others[0]
     if not isinstance(inner, dict) or "$ref" in inner or inner.get("type") not in PRIMITIVES:
         return
+    if "enum" in inner or "const" in inner:
+        return  # keep anyOf so the generator emits ``Literal[...] | None``
     del node["anyOf"]
     for key, value in inner.items():
         if key == "type":

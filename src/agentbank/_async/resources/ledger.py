@@ -16,7 +16,7 @@ __all__ = ["AsyncLedger"]
 class AsyncLedger(AsyncAPIResource):
     """The double-entry ledger: immutable, balanced journal entries."""
 
-    async def entries(
+    async def list_entries(
         self,
         account_id: str | None = None,
         *,
@@ -36,7 +36,7 @@ class AsyncLedger(AsyncAPIResource):
             request_options=request_options,
         )
 
-    async def entries_all(
+    async def list_entries_all(
         self,
         account_id: str | None = None,
         *,

@@ -5,7 +5,8 @@ from __future__ import annotations
 from agentbank import _operations as ops
 from agentbank._async.resources._base import AsyncAPIResource
 from agentbank._base_client import RequestOptions
-from agentbank._resource_helpers import compact
+from agentbank._resource_helpers import compact, owner_signature_idempotency_key
+from agentbank.chains import assert_testnet
 from agentbank.keys import SessionKey, SignerLike, personal_sign_hash, to_signer
 from agentbank.models import OwnerOperation
 
@@ -21,7 +22,7 @@ class AsyncOwnerOperations(AsyncAPIResource):
     bytes) and the API submits the operation.
     """
 
-    async def get(
+    async def retrieve(
         self, operation_id: str, *, request_options: RequestOptions | None = None
     ) -> OwnerOperation:
         """Get an owner operation."""
@@ -59,17 +60,19 @@ class AsyncOwnerOperations(AsyncAPIResource):
     ) -> OwnerOperation:
         """Fetch an owner operation, sign its ``user_op_hash`` with the owner key, submit it.
 
-        Intended for testnet development owners held in software. Production
-        owner keys live in hardware wallets: sign ``user_op_hash`` there and call
-        :meth:`submit_signature`.
+        The owner key signs the raw 32 bytes of ``user_op_hash`` (EIP-191).
+        Mainnet chain ids are refused. Intended for testnet development owners
+        held in software; production owner keys live in hardware wallets: sign
+        ``user_op_hash`` there and call :meth:`submit_signature`.
         """
-        operation = await self.get(operation_id, request_options=request_options)
+        operation = await self.retrieve(operation_id, request_options=request_options)
         if operation.status != "requires_signature":
             return operation
+        assert_testnet(operation.chain_id)
         signature = personal_sign_hash(to_signer(owner), operation.user_op_hash)
         return await self.submit_signature(
             operation_id,
             signature=signature,
-            idempotency_key=f"sig:{operation_id}:{operation.user_op_hash}",
+            idempotency_key=owner_signature_idempotency_key(operation_id, operation.user_op_hash),
             request_options=request_options,
         )

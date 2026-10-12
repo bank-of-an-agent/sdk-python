@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from pydantic import ValidationError
 
 from agentbank import (
     AgentBank,
@@ -22,6 +23,7 @@ from agentbank import (
     PaymentError,
     PolicyDeniedError,
     ServiceUnavailableError,
+    owner_payloads,
 )
 from agentbank.eip712 import verify_owner_authorization
 from agentbank.models import Payment
@@ -88,10 +90,10 @@ async def test_async_retries_and_errors(
 
     api.get(f"/v1/payments/{PAYMENT_ID}").mock(side_effect=httpx.ReadTimeout("slow"))
     with pytest.raises(APITimeoutError):
-        await async_agent.payments.get(PAYMENT_ID)
+        await async_agent.payments.retrieve(PAYMENT_ID)
     api.get(f"/v1/accounts/{ACCOUNT_ID}").mock(side_effect=httpx.ReadError("reset"))
     with pytest.raises(APIConnectionError):
-        await async_agent.accounts.get()
+        await async_agent.accounts.retrieve()
     api.get(f"/v1/accounts/{ACCOUNT_ID}/balances").respond(
         503, json={"code": "cosigner_unavailable"}
     )
@@ -116,7 +118,7 @@ async def test_async_lifecycle_and_low_level_call(api: respx.MockRouter) -> None
     assert not http.is_closed
     await http.aclose()
     async with AsyncAgentBank(api_key=API_KEY, base_url=BASE_URL) as owned:
-        assert owned.chain_id == 84532
+        assert owned.chain_id is None
         assert owned.session_id is None
         assert owned.account_id is None
         assert owned.config.base_url == BASE_URL
@@ -137,7 +139,7 @@ async def test_async_pay_wait_and_guards(
         ]
     )
     submit = api.post(f"/v1/payments/{PAYMENT_ID}/signature").respond(json=payment("submitted"))
-    settled = await async_agent.payments.wait_for_settlement(PAYMENT_ID, timeout=60)
+    settled = await async_agent.payments.complete(PAYMENT_ID, wait_for_settlement=True, timeout=60)
     assert settled.status == "settled"
     assert submit.call_count == 1
 
@@ -179,6 +181,7 @@ async def test_async_owner_helpers(async_principal: AsyncAgentBank, api: respx.M
             payload=payload,
         )
 
+    meta = api.get("/v1/meta").respond(json=example("Meta", owner_authorization_chain_id=84532))
     sessions = api.post("/v1/sessions").respond(201, json=example("Session"))
     scope = {"max_per_tx": "1.00", "max_per_day": "10.00", "expires_at": "2026-10-12T00:00:00Z"}
     await async_principal.sessions.create(
@@ -201,16 +204,16 @@ async def test_async_owner_helpers(async_principal: AsyncAgentBank, api: respx.M
 
     policy = {"limits": {"per_tx": "10.00"}}
     policies = api.put(f"/v1/agents/{AGENT_ID}/policy").respond(json=example("AgentPolicy"))
-    await async_principal.policies.update(AGENT_ID, policy=policy, owner=OWNER_KEY)
+    await async_principal.policies.put(AGENT_ID, policy=policy, owner=OWNER_KEY)
     _, auth = authorization(policies)
-    check(auth, "policy.loosen", AGENT_ID, policy)
+    check(auth, "policy.loosen", AGENT_ID, owner_payloads.policy_loosen(AGENT_ID, policy).payload)
     explicit = {
         "signer": OWNER_ADDRESS,
         "signature": "0x" + "11" * 65,
         "issued_at": 1,
         "expires_at": 2,
     }
-    await async_principal.policies.update(AGENT_ID, policy=policy, owner_authorization=explicit)
+    await async_principal.policies.put(AGENT_ID, policy=policy, owner_authorization=explicit)
     assert json.loads(policies.calls.last.request.content)["owner_authorization"] == explicit
 
     api.get("/v1/orgs/me").respond(json=example("Org", id=ORG_ID))
@@ -225,19 +228,19 @@ async def test_async_owner_helpers(async_principal: AsyncAgentBank, api: respx.M
     check(auth, "agent.unfreeze", AGENT_ID, {"reason": "ok"})
 
     treasury = api.put("/v1/orgs/me/treasury").respond(json=example("Org"))
-    await async_principal.treasury.set_account(account_id=ACCOUNT_ID, owner=OWNER_KEY)
+    await async_principal.treasury.set(account_id=ACCOUNT_ID, owner=OWNER_KEY)
     _, auth = authorization(treasury)
     check(auth, "treasury.set", ORG_ID, {"account_id": ACCOUNT_ID})
 
     topup = api.put(f"/v1/agents/{AGENT_ID}/auto-topup").respond(json=example("AutoTopUpRule"))
-    await async_principal.treasury.set_auto_topup(
+    await async_principal.treasury.put_auto_topup(
         AGENT_ID, refill_to="5.00", when_below="1.00", max_per_day="10.00", owner=OWNER_KEY
     )
     body, auth = authorization(topup)
     check(auth, "topup.set", AGENT_ID, body)
 
     sweep = api.put(f"/v1/accounts/{ACCOUNT_ID}/sweep-rule").respond(json=example("SweepRule"))
-    await async_principal.treasury.set_sweep_rule(
+    await async_principal.treasury.put_sweep_rule(
         ACCOUNT_ID, fund_id=id_for("fnd"), threshold="10.00", max_share_bps=100, owner=OWNER_KEY
     )
     body, auth = authorization(sweep)
@@ -252,7 +255,11 @@ async def test_async_owner_helpers(async_principal: AsyncAgentBank, api: respx.M
     operation_id = id_for("oop")
     api.get(f"/v1/owner-operations/{operation_id}").respond(
         json=example(
-            "OwnerOperation", id=operation_id, status="requires_signature", user_op_hash=HASH
+            "OwnerOperation",
+            id=operation_id,
+            status="requires_signature",
+            user_op_hash=HASH,
+            chain_id=84532,
         )
     )
     submit = api.post(f"/v1/owner-operations/{operation_id}/signature").respond(
@@ -260,7 +267,15 @@ async def test_async_owner_helpers(async_principal: AsyncAgentBank, api: respx.M
     )
     result = await async_principal.owner_operations.sign_and_submit(operation_id, owner=OWNER_KEY)
     assert result.status == "submitted"
-    assert submit.calls.last.request.headers["idempotency-key"] == f"sig:{operation_id}:{HASH}"
+    assert meta.call_count == 1
+    assert await async_principal.owner_authorization_chain_id() == 84532
+    assert (await async_principal.meta()).chain == "base-sepolia"
+    assert (await async_principal.meta(refresh=True)).owner_authorization_chain_id == 84532
+    assert meta.call_count == 2
+    assert (
+        submit.calls.last.request.headers["idempotency-key"]
+        == f"oop_sig_{operation_id}_{HASH[2:18]}"
+    )
 
 
 async def test_async_misc(
@@ -342,14 +357,18 @@ def test_sync_odds_and_ends(principal: AgentBank, agent: AgentBank, api: respx.M
         "expires_at": 2,
     }
     policies = api.put(f"/v1/agents/{AGENT_ID}/policy").respond(json=example("AgentPolicy"))
-    principal.policies.update(AGENT_ID, policy={}, owner_authorization=explicit)
+    principal.policies.put(AGENT_ID, policy={}, owner_authorization=explicit)
     assert json.loads(policies.calls.last.request.content)["owner_authorization"] == explicit
     sessions = api.post("/v1/sessions").respond(201, json=example("Session"))
-    principal.sessions.create(account_id=ACCOUNT_ID, public_key=SESSION_ADDRESS, scope={})
+    scope = {"max_per_tx": "1.00", "max_per_day": "2.00", "expires_at": "2026-10-12T00:00:00Z"}
+    principal.sessions.create(account_id=ACCOUNT_ID, public_key=SESSION_ADDRESS, scope=scope)
     assert "owner_authorization" not in json.loads(sessions.calls.last.request.content)
     mandates = api.post("/v1/mandates").respond(201, json=example("Mandate"))
-    principal.mandates.create(agent_id=AGENT_ID, mandate={})
+    mandate = build(SCHEMAS["OpenPaymentMandate"])
+    principal.mandates.create(agent_id=AGENT_ID, mandate=mandate)
     assert "owner_authorization" not in json.loads(mandates.calls.last.request.content)
+    with pytest.raises(ValidationError):
+        principal.sessions.create(account_id=ACCOUNT_ID, public_key=SESSION_ADDRESS, scope={})
     escrows = api.post("/v1/escrows").respond(201, json=example("Escrow", signing_request=None))
     agent.escrows.create(
         payee={"address": OWNER_ADDRESS}, amount="1.00", expires_at="2026-11-01T00:00:00Z"
@@ -388,3 +407,108 @@ def test_generated_sync_client_is_up_to_date() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+async def test_async_payment_outcomes(
+    async_agent: AsyncAgentBank, api: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentbank import BadRequestError, PaymentDeniedError, PaymentFailedError
+
+    ticks = iter(range(0, 10_000, 5))
+    monkeypatch.setattr(AsyncAgentBank, "_monotonic", lambda self: float(next(ticks)))
+
+    def created(**overrides: Any) -> dict[str, Any]:
+        fields: dict[str, Any] = {
+            "amount": {"amount": "3.00", "asset": "USDC"},
+            "counterparty": {
+                "type": "address",
+                "address": OWNER_ADDRESS,
+                "agent_id": None,
+                "x402_domain": None,
+            },
+            "signing_request": signing_request(),
+        }
+        fields.update(overrides)
+        status = fields.pop("status", "requires_signature")
+        return payment(status, **fields)
+
+    api.post("/v1/payments").respond(201, json=created(amount={"amount": "4.00", "asset": "USDC"}))
+    with pytest.raises(BadRequestError, match=r"amount 4\.00 != 3\.00"):
+        await async_agent.pay(to=OWNER_ADDRESS, amount="3.00")
+    other = {"type": "address", "address": SESSION_ADDRESS, "agent_id": None, "x402_domain": None}
+    api.post("/v1/payments").respond(201, json=created(counterparty=other))
+    with pytest.raises(BadRequestError, match="counterparty address differs"):
+        await async_agent.pay(to=OWNER_ADDRESS, amount="3.00")
+    agent_counterparty = {**other, "agent_id": id_for("agt")[:-1] + "9"}
+    api.post("/v1/payments").respond(201, json=created(counterparty=agent_counterparty))
+    with pytest.raises(BadRequestError, match="counterparty agent differs"):
+        await async_agent.pay(to=AGENT_ID, amount="3.00")
+
+    api.post("/v1/payments").respond(201, json=created(status="failed", failure_reason="revert"))
+    with pytest.raises(PaymentFailedError, match="revert"):
+        await async_agent.pay(to=OWNER_ADDRESS, amount="3.00")
+    api.post("/v1/payments").respond(201, json=created(status="canceled"))
+    with pytest.raises(PaymentError, match="canceled"):
+        await async_agent.pay(to=OWNER_ADDRESS, amount="3.00")
+    api.post("/v1/payments").respond(
+        201, json=created(status="requires_signature", signing_request=None)
+    )
+    with pytest.raises(Exception, match="nothing to sign"):
+        await async_agent.pay(to=OWNER_ADDRESS, amount="3.00")
+
+    api.get(f"/v1/payments/{PAYMENT_ID}").mock(
+        side_effect=[
+            httpx.Response(200, json=payment("requires_approval")),
+            httpx.Response(200, json=payment("denied")),
+        ]
+    )
+    with pytest.raises(PaymentDeniedError):
+        await async_agent.payments.complete(PAYMENT_ID, wait_for_approval=True)
+    api.get(f"/v1/payments/{PAYMENT_ID}").respond(200, json=payment("settled"))
+    submitted = Payment.model_validate(payment("submitted"))
+    assert (await async_agent.payments.wait_for_settlement(submitted)).status == "settled"
+    api.get(f"/v1/payments/{PAYMENT_ID}").respond(200, json=payment("submitted"))
+    with pytest.raises(PaymentError, match="still submitted"):
+        await async_agent.payments.wait_for_settlement(PAYMENT_ID, timeout=10)
+    with pytest.raises(Exception, match="nothing to sign"):
+        async_agent.payments.sign(Payment.model_validate(payment("settled")))
+
+
+async def test_async_escrow_stream_and_vault_branches(
+    async_agent: AsyncAgentBank, async_principal: AsyncAgentBank, api: respx.MockRouter
+) -> None:
+    from agentbank import PaymentFailedError
+    from agentbank.models import Escrow, Stream
+
+    future = {**signing_request(), "expires_at": "2099-01-01T00:00:00Z"}
+    escrow_id, stream_id = id_for("esc"), id_for("str")
+    api.post("/v1/escrows").respond(201, json=example("Escrow", id=escrow_id, status="failed"))
+    with pytest.raises(PaymentFailedError):
+        await async_agent.escrows.lock(
+            payee=OWNER_ADDRESS, amount="1.00", expires_at="2099-01-01T00:00:00Z"
+        )
+    with pytest.raises(PaymentFailedError):
+        await async_agent.escrows.sign_and_submit(
+            Escrow.model_validate(example("Escrow", status="failed", signing_request=future))
+        )
+    api.post("/v1/streams").respond(201, json=example("Stream", id=stream_id, status="failed"))
+    with pytest.raises(PaymentFailedError):
+        await async_agent.streams.start(
+            payee=OWNER_ADDRESS, amount_per_interval="1", interval_seconds=1, deposit="1"
+        )
+    with pytest.raises(PaymentFailedError):
+        await async_agent.streams.sign_and_submit(
+            Stream.model_validate(example("Stream", status="failed", signing_request=future))
+        )
+    vault_id = id_for("vlt")
+    withdraw = api.post(f"/v1/vaults/{vault_id}/withdraw").respond(json=example("Vault"))
+    explicit = {
+        "signer": OWNER_ADDRESS,
+        "signature": "0x" + "11" * 65,
+        "issued_at": 1,
+        "expires_at": 2,
+    }
+    await async_principal.vaults.withdraw(vault_id, amount="2.00", owner_authorization=explicit)
+    assert json.loads(withdraw.calls.last.request.content)["owner_authorization"] == explicit
+    with pytest.raises(ConfigurationError, match="account_id"):
+        await async_principal.payment_requests.create(amount="1.00")

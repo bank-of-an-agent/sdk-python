@@ -4,16 +4,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import httpx
 
-from agentbank.errors import ConfigurationError
+from agentbank.chains import chain_for_network
+from agentbank.errors import ConfigurationError, X402Error
 from agentbank.keys import EthSigner, SessionKey, SignerLike, to_signer
 from agentbank.money import coerce_money, to_minor
 from agentbank.x402 import (
+    DEFAULT_MAX_AMOUNT_PER_REQUEST,
+    DEFAULT_X402_NETWORK,
     PAYMENT_SIGNATURE_HEADER,
     RECEIPT_EXTENSION,
     V1_PAYMENT_HEADER,
@@ -21,6 +24,7 @@ from agentbank.x402 import (
     build_payment_header,
     decode_payment_response,
     parse_payment_required,
+    rejection_reason,
     select_requirement,
 )
 
@@ -34,7 +38,7 @@ class X402Transport(httpx.BaseTransport):
     """An ``httpx`` transport that pays HTTP 402 (x402) challenges through Agent Bank.
 
     Wrap any HTTP client used by an agent; requests that come back ``402`` are
-    paid within policy and retried with the payment header::
+    paid within policy and retried once with the payment header::
 
         transport = bank.x402.transport(max_amount="0.10")
         with httpx.Client(transport=transport) as http:
@@ -46,23 +50,32 @@ class X402Transport(httpx.BaseTransport):
     Args:
         bank: An agent-authenticated client (session key) used for ``POST /v1/x402/pay``.
         max_amount: Client-side ceiling per request in USDC (decimal string or
-            ``Decimal``), checked before Agent Bank is even asked.
+            ``Decimal``; default ``"1.00"``), checked before Agent Bank is asked.
+        network: CAIP-2 network to pay on (default Base Sepolia, ``eip155:84532``).
         spend_key: The agent's x402 spend key (defaults to the client's ``spend_key``).
         account_id: Paying account (defaults to the client's ``account_id``).
         mandate_id: Mandate to pay under, if any.
         allowed_domains: Optional allowlist of hosts this transport may pay.
+        on_payment: Called with the :class:`~agentbank.x402.X402Receipt` after each
+            successful paid request (for logging or accounting).
         transport: The transport to wrap (default: a new ``httpx.HTTPTransport``).
+
+    Raises:
+        ConfigurationError: No spend key or account is configured.
+        MainnetLockedError: ``network`` is a mainnet.
     """
 
     def __init__(
         self,
         bank: AgentBank,
         *,
-        max_amount: str | Decimal,
+        max_amount: str | Decimal = DEFAULT_MAX_AMOUNT_PER_REQUEST,
+        network: str = DEFAULT_X402_NETWORK,
         spend_key: SignerLike | SessionKey | None = None,
         account_id: str | None = None,
         mandate_id: str | None = None,
         allowed_domains: Collection[str] | None = None,
+        on_payment: Callable[[X402Receipt], None] | None = None,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         signer: EthSigner | None = (
@@ -73,18 +86,28 @@ class X402Transport(httpx.BaseTransport):
         resolved_account = account_id or bank.account_id
         if not resolved_account:
             raise ConfigurationError("x402 payments need account_id (or a client account_id)")
+        chain_for_network(network)  # refuses mainnets and unknown networks up front
         self._bank = bank
         self._signer = signer
         self._account_id = resolved_account
         self._mandate_id = mandate_id
+        self._network = network
         self._max_amount = to_minor(coerce_money(max_amount))
         self._allowed_domains = (
             frozenset(d.lower() for d in allowed_domains) if allowed_domains is not None else None
         )
+        self._on_payment = on_payment
         self._transport = transport or httpx.HTTPTransport()
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        """Send ``request``; on ``402``, pay the challenge and retry once."""
+        """Send ``request``; on ``402``, pay the challenge and retry once.
+
+        Raises:
+            X402Error: The challenge cannot be paid within the client's limits,
+                the authorization does not match it, or the seller rejects the
+                payment (``payment_rejected``).
+            PaymentDeniedError: Agent Bank's policy denied the payment.
+        """
         request.read()  # buffer the body so the request can be replayed
         response = self._transport.handle_request(request)
         if response.status_code != 402 or _already_paid(request):
@@ -99,6 +122,7 @@ class X402Transport(httpx.BaseTransport):
             challenge,
             request_url=str(request.url),
             max_amount=self._max_amount,
+            network=self._network,
             allowed_domains=self._allowed_domains,
         )
         authorization = self._bank.x402.pay(
@@ -118,12 +142,28 @@ class X402Transport(httpx.BaseTransport):
         )
         paid_request.headers[header.name] = header.value
         paid = self._transport.handle_request(paid_request)
-        paid.extensions[RECEIPT_EXTENSION] = X402Receipt(
+        settlement = decode_payment_response(paid.headers)
+        if paid.status_code == 402:
+            try:
+                paid.read()
+            finally:
+                paid.close()
+            raise X402Error(
+                "payment_rejected",
+                "Seller rejected the x402 payment: " + rejection_reason(paid.headers, paid.content),
+                payment=authorization.payment,
+                settlement=settlement,
+                response=paid,
+            )
+        receipt = X402Receipt(
             payment=authorization.payment,
             requirement=selected,
             header=header,
-            settlement=decode_payment_response(paid.headers),
+            settlement=settlement,
         )
+        paid.extensions[RECEIPT_EXTENSION] = receipt
+        if self._on_payment is not None:
+            self._on_payment(receipt)
         return paid
 
     def close(self) -> None:

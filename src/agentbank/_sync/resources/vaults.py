@@ -9,8 +9,9 @@ from datetime import datetime
 from typing import Any, Literal
 
 from agentbank import _operations as ops
+from agentbank import owner_payloads
 from agentbank._base_client import RequestOptions
-from agentbank._resource_helpers import compact, without_owner_authorization
+from agentbank._resource_helpers import compact
 from agentbank._sync.resources._base import APIResource
 from agentbank.keys import SessionKey, SignerLike
 from agentbank.models import ListVaultsResponse, Vault
@@ -95,7 +96,7 @@ class Vaults(APIResource):
         ):
             yield from page.data
 
-    def get(self, vault_id: str, *, request_options: RequestOptions | None = None) -> Vault:
+    def retrieve(self, vault_id: str, *, request_options: RequestOptions | None = None) -> Vault:
         """Get a vault and its balance."""
         return self._request(
             ops.GET_VAULT, Vault, path_params={"id": vault_id}, request_options=request_options
@@ -142,11 +143,12 @@ class Vaults(APIResource):
             idempotency_key: Optional key; generated when omitted.
             request_options: Per-request overrides.
         """
-        body = compact(amount=coerce_money(amount), owner_authorization=owner_authorization)
-        if owner_authorization is None and owner is not None:
-            body["owner_authorization"] = self._owner_authorization(
-                owner, "vault.withdraw", vault_id, without_owner_authorization(body)
-            )
+        withdrawal = owner_payloads.vault_withdraw(vault_id, amount)
+        body: dict[str, Any] = dict(withdrawal.payload)
+        if owner_authorization is not None:
+            body["owner_authorization"] = owner_authorization
+        elif owner is not None:
+            body["owner_authorization"] = self._owner_authorization(owner, withdrawal)
         return self._request(
             ops.WITHDRAW_VAULT,
             Vault,

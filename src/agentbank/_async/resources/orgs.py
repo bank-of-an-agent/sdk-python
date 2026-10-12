@@ -5,9 +5,10 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from agentbank import _operations as ops
+from agentbank import owner_payloads
 from agentbank._async.resources._base import AsyncAPIResource
 from agentbank._base_client import RequestOptions
-from agentbank._resource_helpers import compact, without_owner_authorization
+from agentbank._resource_helpers import compact
 from agentbank.keys import SessionKey, SignerLike
 from agentbank.models import CreateOrgResponse, KybSession, Org
 
@@ -57,8 +58,8 @@ class AsyncOrgs(AsyncAPIResource):
             request_options=request_options,
         )
 
-    async def me(self, *, request_options: RequestOptions | None = None) -> Org:
-        """Get the org the API key belongs to."""
+    async def retrieve(self, *, request_options: RequestOptions | None = None) -> Org:
+        """Get the org the API key belongs to (``GET /v1/orgs/me``)."""
         return await self._request(ops.GET_CURRENT_ORG, Org, request_options=request_options)
 
     async def start_kyb(
@@ -107,18 +108,20 @@ class AsyncOrgs(AsyncAPIResource):
 
         Args:
             reason: Why the org is being unfrozen.
-            owner_authorization: A pre-signed ``org.unfreeze`` authorization.
-            owner: Alternatively, the owner key; the SDK signs ``org.unfreeze`` with
-                subject = the org id and payload ``{"reason": reason}``.
+            owner_authorization: A pre-signed ``org.unfreeze`` authorization
+                (subject = the org id, payload ``{"reason": reason}``).
+            owner: Alternatively, the owner key; the SDK looks up the org id and
+                signs it.
             idempotency_key: Optional key; generated when omitted.
             request_options: Per-request overrides.
         """
-        body = compact(reason=reason, owner_authorization=owner_authorization)
-        if owner_authorization is None and owner is not None:
-            org = await self.me(request_options=request_options)
-            body["owner_authorization"] = self._owner_authorization(
-                owner, "org.unfreeze", org.id, without_owner_authorization(body)
-            )
+        body: dict[str, Any] = {"reason": reason}
+        if owner_authorization is not None:
+            body["owner_authorization"] = owner_authorization
+        elif owner is not None:
+            org = await self.retrieve(request_options=request_options)
+            unfreeze = owner_payloads.org_unfreeze(org.id, reason)
+            body["owner_authorization"] = await self._owner_authorization(owner, unfreeze)
         return await self._request(
             ops.UNFREEZE_ORG,
             Org,

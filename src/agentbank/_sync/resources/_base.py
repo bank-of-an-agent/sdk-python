@@ -11,9 +11,10 @@ from pydantic import BaseModel
 
 from agentbank._base_client import RequestOptions
 from agentbank._spec import Operation
-from agentbank.eip712 import OwnerAction, owner_authorize
+from agentbank.eip712 import owner_authorize
 from agentbank.errors import ConfigurationError
 from agentbank.keys import SessionKey, SignerLike
+from agentbank.owner_payloads import OwnerActionPayload
 
 if TYPE_CHECKING:
     from agentbank._sync.client import AgentBank
@@ -39,13 +40,11 @@ class APIResource:
         return resolved
 
     def _owner_authorization(
-        self,
-        owner: SignerLike | SessionKey,
-        action: OwnerAction,
-        subject: str,
-        payload: Any,
+        self, owner: SignerLike | SessionKey, request: OwnerActionPayload
     ) -> dict[str, Any]:
-        return owner_authorize(owner, self._client.chain_id, action, subject, payload)
+        """Sign ``request`` with the owner key in the deployment's EIP-712 domain."""
+        chain_id = self._client.owner_authorization_chain_id()
+        return owner_authorize(owner, chain_id, request.action, request.subject, request.payload)
 
     def _request(
         self,

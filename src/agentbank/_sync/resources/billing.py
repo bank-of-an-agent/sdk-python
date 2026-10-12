@@ -22,7 +22,7 @@ class Billing(APIResource):
         """List plans (public)."""
         return self._request(ops.LIST_PLANS, ListPlansResponse, request_options=request_options)
 
-    def get_subscription(self, *, request_options: RequestOptions | None = None) -> Subscription:
+    def subscription(self, *, request_options: RequestOptions | None = None) -> Subscription:
         """Get the org's subscription."""
         return self._request(ops.GET_SUBSCRIPTION, Subscription, request_options=request_options)
 
@@ -42,7 +42,7 @@ class Billing(APIResource):
             request_options=request_options,
         )
 
-    def get_fees(self, *, period: str, request_options: RequestOptions | None = None) -> FeeSummary:
+    def fees(self, *, period: str, request_options: RequestOptions | None = None) -> FeeSummary:
         """Fees charged in a period (``YYYY-MM``), by kind."""
         return self._request(
             ops.GET_FEES, FeeSummary, query={"period": period}, request_options=request_options

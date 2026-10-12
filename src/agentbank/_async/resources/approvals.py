@@ -52,7 +52,7 @@ class AsyncApprovals(AsyncAPIResource):
             for item in page.data:
                 yield item
 
-    async def get(
+    async def retrieve(
         self, approval_id: str, *, request_options: RequestOptions | None = None
     ) -> Approval:
         """Get an approval."""

@@ -25,6 +25,7 @@ __all__ = [
     "ERROR_CATALOG",
     "PROBLEM_TYPE_PREFIX",
     "APIConnectionError",
+    "APIResponseValidationError",
     "APITimeoutError",
     "AgentBankError",
     "AuthenticationError",
@@ -38,7 +39,9 @@ __all__ = [
     "MainnetLockedError",
     "NotFoundError",
     "OwnerSignatureRequiredError",
+    "PaymentDeniedError",
     "PaymentError",
+    "PaymentFailedError",
     "PermissionDeniedError",
     "PolicyDeniedError",
     "RateLimitError",
@@ -101,7 +104,7 @@ class AgentBankError(Exception):
     Attributes:
         code: Stable machine-readable code, e.g. ``"policy_denied"``. API errors
             use the server's catalog; client-side errors use SDK codes such as
-            ``"connection_error"`` or ``"x402_amount_exceeds_limit"``.
+            ``"connection_error"``, ``"invalid_response"`` or ``"configuration_error"``.
         status: HTTP status of the response, or the catalog status for
             locally raised errors with a catalog code, else ``None``.
         title: Short human-readable summary of the problem type.
@@ -176,6 +179,16 @@ class APITimeoutError(APIConnectionError):
 
     def __init__(self, detail: str = "Request timed out") -> None:
         super().__init__(detail, code="timeout")
+
+
+class APIResponseValidationError(AgentBankError):
+    """A successful response did not match the API contract (code ``invalid_response``).
+
+    Usually means the SDK is older or newer than the API; upgrade the SDK.
+    """
+
+    def __init__(self, response: httpx.Response, detail: str) -> None:
+        super().__init__("invalid_response", detail, status=response.status_code, response=response)
 
 
 # ----------------------------------------------------------------- by status
@@ -263,43 +276,105 @@ class SignatureVerificationError(AuthenticationError):
 
 
 class PaymentError(AgentBankError):
-    """A payment (or escrow/stream operation) did not complete.
+    """A payment, escrow or stream did not complete.
 
-    Raised by the helpers that drive a payment to completion
-    (``payments.pay``, ``payments.wait_for_settlement``). The resource that
-    failed is available as :attr:`payment`.
+    Raised by the helpers that drive a resource to completion (``payments.pay``,
+    ``payments.complete``, ``payments.wait_for_settlement``, ``escrows.lock``,
+    ``streams.start``). The resource is available as :attr:`resource`.
 
     Codes:
-        ``payment_denied``, ``payment_failed``, ``payment_canceled``,
-        ``payment_expired``: the payment reached that terminal status.
+        ``payment_canceled``, ``payment_expired``: the payment reached that status.
         ``requires_owner``: policy requires the owner key to sign this payment
-            itself; see ``payment.owner_operation_id``.
-        ``settlement_timeout``: the payment did not settle within the timeout
-            (it may still settle later).
+            itself; see ``resource.owner_operation_id``.
+        ``settlement_timeout``: still pending after the timeout (it may settle later).
+
+    Denials raise :class:`PaymentDeniedError` and on-chain failures
+    :class:`PaymentFailedError`, both subclasses.
     """
 
-    def __init__(self, code: str, detail: str, *, payment: Any = None) -> None:
+    def __init__(self, code: str, detail: str, *, resource: Any = None) -> None:
         super().__init__(code, detail)
-        self.payment = payment
+        self.resource = resource
+
+    @property
+    def payment(self) -> Any:
+        """Alias of :attr:`resource`."""
+        return self.resource
+
+
+class PaymentDeniedError(PaymentError, PolicyDeniedError):
+    """The payment was denied by policy or by the co-signer (code ``policy_denied``).
+
+    Catchable as :class:`PolicyDeniedError` too; ``resource.decision`` lists the
+    rules that fired.
+    """
+
+    def __init__(self, detail: str, *, resource: Any = None) -> None:
+        super().__init__("policy_denied", detail, resource=resource)
+
+
+class PaymentFailedError(PaymentError):
+    """The payment, escrow or stream failed on-chain (code ``chain_error``).
+
+    For example a reverted operation or a bundler timeout; the hold is released.
+    """
+
+    def __init__(self, detail: str, *, resource: Any = None) -> None:
+        super().__init__("chain_error", detail, resource=resource)
+
+
+#: Catalog code of each x402 failure reason (same mapping as the TypeScript SDK).
+X402_REASON_CODES: Mapping[str, str] = {
+    "invalid_challenge": "invalid_request",
+    "no_acceptable_requirement": "invalid_request",
+    "amount_exceeds_limit": "policy_denied",
+    "domain_not_allowed": "policy_denied",
+    "approval_required": "policy_denied",
+    "authorization_mismatch": "internal",
+    "payment_rejected": "conflict",
+    "spend_key_missing": "invalid_request",
+    "unexpected_status": "internal",
+}
 
 
 class X402Error(AgentBankError):
-    """An x402 (HTTP 402) payment could not be completed client-side.
+    """An x402 (HTTP 402) payment failed client-side or was rejected by the seller.
 
-    Codes:
-        ``x402_invalid_challenge``: the 402 response is not a valid x402 challenge.
-        ``x402_unsupported``: no acceptable requirement (scheme, network, asset).
-        ``x402_amount_exceeds_limit``: the price is above the client's ``max_amount``.
-        ``x402_domain_not_allowed``: the host is not in ``allowed_domains``.
-        ``x402_not_authorized``: the API did not authorize the payment (approval
-            required or denied); see :attr:`payment`.
-        ``x402_authorization_mismatch``: the API returned an authorization that
-            does not match the challenge; the SDK refused to sign it.
+    Attributes:
+        reason: Machine-readable reason (``.code`` is the matching catalog code):
+            ``invalid_challenge`` (not a valid x402 challenge),
+            ``no_acceptable_requirement`` (no ``exact`` USDC option on the network),
+            ``amount_exceeds_limit`` (price above ``max_amount``),
+            ``domain_not_allowed`` (host not in ``allowed_domains``),
+            ``approval_required`` (x402 cannot wait for human approval),
+            ``authorization_mismatch`` (the API's authorization differs from the
+            challenge, so nothing was signed),
+            ``payment_rejected`` (the seller answered 402 again after payment),
+            ``spend_key_missing``, ``unexpected_status``.
+        payment: The Agent Bank payment, if one was created (its hold expires if
+            the seller never settles).
+        settlement: The seller's decoded settlement response, if any.
+        response: The seller's last HTTP response, if any.
     """
 
-    def __init__(self, code: str, detail: str, *, payment: Any = None) -> None:
-        super().__init__(code, detail)
+    def __init__(
+        self,
+        reason: str,
+        detail: str,
+        *,
+        payment: Any = None,
+        settlement: Mapping[str, Any] | None = None,
+        response: httpx.Response | None = None,
+    ) -> None:
+        super().__init__(
+            X402_REASON_CODES.get(reason, "internal"),
+            detail,
+            extensions={"reason": reason},
+            response=response,
+        )
+        self.reason = reason
         self.payment = payment
+        self.settlement = dict(settlement) if settlement is not None else None
 
 
 _CODE_CLASSES: dict[str, type[AgentBankError]] = {

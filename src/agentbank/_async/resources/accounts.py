@@ -80,7 +80,7 @@ class AsyncAccounts(AsyncAPIResource):
             for item in page.data:
                 yield item
 
-    async def get(
+    async def retrieve(
         self, account_id: str | None = None, *, request_options: RequestOptions | None = None
     ) -> Account:
         """Get an account (defaults to the client's ``account_id``)."""

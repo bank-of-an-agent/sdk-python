@@ -20,14 +20,14 @@ from typing import Any, Literal, TypedDict, TypeVar
 from urllib.parse import quote
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from agentbank._spec import Operation
 from agentbank._version import __version__
 from agentbank.canonical import canonical_json
 from agentbank.chains import assert_testnet
-from agentbank.errors import ConfigurationError
-from agentbank.http_signatures import sign_request
+from agentbank.errors import APIResponseValidationError, ConfigurationError
+from agentbank.http_signatures import MAX_SIGNATURE_LIFETIME_SECONDS, sign_request
 from agentbank.keys import EthSigner, SessionKey, SignerLike, to_signer
 
 __all__ = [
@@ -110,16 +110,16 @@ class ClientConfig:
 
     base_url: str
     facilitator_url: str
-    api_key: str | None
+    api_key: str | None = field(repr=False)
     session_id: str | None
-    session_signer: EthSigner | None
-    spend_signer: EthSigner | None
+    session_signer: EthSigner | None = field(repr=False)
+    spend_signer: EthSigner | None = field(repr=False)
     account_id: str | None
-    chain_id: int
+    chain_id: int | None
     timeout: httpx.Timeout
     max_retries: int
     signature_lifetime_seconds: int
-    default_headers: dict[str, str] = field(default_factory=dict)
+    default_headers: dict[str, str] = field(default_factory=dict, repr=False)
 
     @classmethod
     def resolve(
@@ -132,16 +132,19 @@ class ClientConfig:
         account_id: str | None,
         base_url: str | None,
         facilitator_url: str | None,
-        chain_id: int,
+        chain_id: int | None,
         timeout: float | httpx.Timeout | None,
         max_retries: int,
         signature_lifetime_seconds: int,
         default_headers: Mapping[str, str] | None,
     ) -> ClientConfig:
         """Merge explicit arguments with ``AGENTBANK_*`` environment variables."""
-        assert_testnet(chain_id)
+        if chain_id is not None:
+            assert_testnet(chain_id)
         if max_retries < 0:
             raise ConfigurationError("max_retries must be >= 0")
+        if not 0 < signature_lifetime_seconds <= MAX_SIGNATURE_LIFETIME_SECONDS:
+            raise ConfigurationError("signature_lifetime_seconds must be between 1 and 300")
         resolved_base = (base_url or _env("AGENTBANK_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
         resolved_facilitator = (
             facilitator_url or _env("AGENTBANK_FACILITATOR_URL") or resolved_base
@@ -335,11 +338,12 @@ def is_retryable_response(prepared: PreparedRequest, response: httpx.Response) -
     return response.status_code in RETRYABLE_STATUSES and prepared.operation.retry_safe
 
 
-def retry_delay(attempt: int, response: httpx.Response | None = None) -> float:
-    """Seconds to wait before retry number ``attempt + 1``.
+def retry_delay(attempt: int, response: httpx.Response | None = None) -> float | None:
+    """Seconds to wait before retry number ``attempt + 1``, or ``None`` to stop retrying.
 
-    Honors ``Retry-After`` (seconds or HTTP date, capped at 60 s); otherwise
-    exponential backoff from 0.5 s to 8 s with jitter.
+    Honors ``Retry-After`` (seconds or HTTP date). When the server asks to wait
+    longer than 60 s the client does not retry sooner; it gives up and raises.
+    Otherwise: exponential backoff from 0.5 s to 8 s with jitter.
     """
     if response is not None:
         header = response.headers.get("retry-after")
@@ -351,19 +355,38 @@ def retry_delay(attempt: int, response: httpx.Response | None = None) -> float:
                     delay = email.utils.parsedate_to_datetime(header).timestamp() - time.time()
                 except (TypeError, ValueError):
                     delay = -1.0
-            if 0 <= delay <= MAX_RETRY_AFTER:
+            if delay > MAX_RETRY_AFTER:
+                return None
+            if delay >= 0:
                 return delay
     base: float = min(INITIAL_RETRY_DELAY * 2**attempt, MAX_RETRY_DELAY)
     return base * (1 - 0.25 * random.random())  # noqa: S311 - jitter, not cryptography
 
 
 def parse_json(response: httpx.Response) -> Any:
-    """Decode a JSON response body (``None`` for empty bodies)."""
+    """Decode a JSON response body (``None`` for empty bodies).
+
+    Raises:
+        APIResponseValidationError: The body is not JSON.
+    """
     if not response.content:
         return None
-    return response.json()
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise APIResponseValidationError(response, f"Response is not JSON: {exc}") from exc
 
 
 def parse_model(response: httpx.Response, cast_to: type[ModelT]) -> ModelT:
-    """Validate a JSON response body into ``cast_to``."""
-    return cast_to.model_validate(parse_json(response))
+    """Validate a JSON response body into ``cast_to``.
+
+    Raises:
+        APIResponseValidationError: The body does not match the API contract.
+    """
+    data = parse_json(response)
+    try:
+        return cast_to.model_validate(data)
+    except ValidationError as exc:
+        raise APIResponseValidationError(
+            response, f"Response does not match {cast_to.__name__}: {exc}"
+        ) from exc
