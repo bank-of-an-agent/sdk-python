@@ -38,6 +38,7 @@ __all__ = [
     "MainnetLockedError",
     "NotFoundError",
     "OwnerSignatureRequiredError",
+    "PaymentError",
     "PermissionDeniedError",
     "PolicyDeniedError",
     "RateLimitError",
@@ -259,6 +260,27 @@ class SignatureVerificationError(AuthenticationError):
 
     def __init__(self, detail: str, *, code: str = "signature_invalid") -> None:
         super().__init__(code, detail)
+
+
+class PaymentError(AgentBankError):
+    """A payment (or escrow/stream operation) did not complete.
+
+    Raised by the helpers that drive a payment to completion
+    (``payments.pay``, ``payments.wait_for_settlement``). The resource that
+    failed is available as :attr:`payment`.
+
+    Codes:
+        ``payment_denied``, ``payment_failed``, ``payment_canceled``,
+        ``payment_expired``: the payment reached that terminal status.
+        ``requires_owner``: policy requires the owner key to sign this payment
+            itself; see ``payment.owner_operation_id``.
+        ``settlement_timeout``: the payment did not settle within the timeout
+            (it may still settle later).
+    """
+
+    def __init__(self, code: str, detail: str, *, payment: Any = None) -> None:
+        super().__init__(code, detail)
+        self.payment = payment
 
 
 class X402Error(AgentBankError):

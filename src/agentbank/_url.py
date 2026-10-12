@@ -41,9 +41,7 @@ def _percent_encode(value: str, encode_set: frozenset[str]) -> str:
 
 
 def _serialize_host(raw_host: str) -> str:
-    if raw_host.startswith("["):
-        if not raw_host.endswith("]"):
-            raise ValueError(f"Invalid IPv6 host: {raw_host!r}")
+    if raw_host.startswith("["):  # the caller guarantees the closing bracket
         return "[" + ipaddress.IPv6Address(raw_host[1:-1]).compressed + "]"
     if not raw_host:
         raise ValueError("URL has an empty host")

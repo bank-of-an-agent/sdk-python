@@ -1,0 +1,78 @@
+# Generated from src/agentbank/_async/resources/mandates.py by scripts/unasync.py.
+# Do not edit: change the async source and regenerate.
+"""AP2 payment mandates: ``/v1/mandates``."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+from agentbank import _operations as ops
+from agentbank._base_client import RequestOptions
+from agentbank._resource_helpers import compact
+from agentbank._sync.resources._base import APIResource
+from agentbank.canonical import to_jsonable
+from agentbank.keys import SessionKey, SignerLike
+from agentbank.models import Mandate, OpenPaymentMandate
+
+__all__ = ["Mandates"]
+
+
+class Mandates(APIResource):
+    """AP2 open Payment Mandates granting an agent bounded authority."""
+
+    def create(
+        self,
+        *,
+        agent_id: str,
+        mandate: OpenPaymentMandate | Mapping[str, Any],
+        owner_authorization: dict[str, Any] | None = None,
+        owner: SignerLike | SessionKey | None = None,
+        idempotency_key: str | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> Mandate:
+        """Grant an agent authority with a mandate signed by the owner.
+
+        Args:
+            agent_id: The agent receiving the mandate.
+            mandate: The AP2 open Payment Mandate (``vct``, ``constraints``,
+                ``iat``, ``exp``, ``agent_id`` ...).
+            owner_authorization: A pre-signed ``mandate.issue`` authorization over
+                the mandate object (subject = ``agent_id``).
+            owner: Alternatively, the owner key; the SDK signs it.
+            idempotency_key: Optional key; generated when omitted.
+            request_options: Per-request overrides.
+        """
+        mandate_json = to_jsonable(mandate)
+        body = compact(agent_id=agent_id, mandate=mandate_json)
+        if owner_authorization is not None:
+            body["owner_authorization"] = owner_authorization
+        elif owner is not None:
+            body["owner_authorization"] = self._owner_authorization(
+                owner, "mandate.issue", agent_id, mandate_json
+            )
+        return self._request(
+            ops.CREATE_MANDATE,
+            Mandate,
+            body=body,
+            idempotency_key=idempotency_key,
+            request_options=request_options,
+        )
+
+    def get(self, mandate_id: str, *, request_options: RequestOptions | None = None) -> Mandate:
+        """Get a mandate, including cumulative ``spent`` under it."""
+        return self._request(
+            ops.GET_MANDATE,
+            Mandate,
+            path_params={"id": mandate_id},
+            request_options=request_options,
+        )
+
+    def revoke(self, mandate_id: str, *, request_options: RequestOptions | None = None) -> Mandate:
+        """Revoke a mandate (a tightening change: immediate)."""
+        return self._request(
+            ops.REVOKE_MANDATE,
+            Mandate,
+            path_params={"id": mandate_id},
+            request_options=request_options,
+        )

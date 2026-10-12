@@ -1,0 +1,3 @@
+# Generated from src/agentbank/_async/__init__.py by scripts/unasync.py.
+# Do not edit: change the async source and regenerate.
+"""Synchronous client and resources."""
