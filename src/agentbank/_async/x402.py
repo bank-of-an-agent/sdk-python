@@ -14,7 +14,6 @@ from agentbank.keys import EthSigner, SessionKey, SignerLike, to_signer
 from agentbank.money import coerce_money, to_minor
 from agentbank.x402 import (
     DEFAULT_MAX_AMOUNT_PER_REQUEST,
-    DEFAULT_X402_NETWORK,
     PAYMENT_SIGNATURE_HEADER,
     RECEIPT_EXTENSION,
     V1_PAYMENT_HEADER,
@@ -49,7 +48,9 @@ class AsyncX402Transport(httpx.AsyncBaseTransport):
         bank: An agent-authenticated client (session key) used for ``POST /v1/x402/pay``.
         max_amount: Client-side ceiling per request in USDC (decimal string or
             ``Decimal``; default ``"1.00"``), checked before Agent Bank is asked.
-        network: CAIP-2 network to pay on (default Base Sepolia, ``eip155:84532``).
+        network: CAIP-2 network to pay on. Default: the deployment's network and
+            USDC from ``GET /v1/meta``, resolved on the first 402 and cached on
+            the client (``bank.x402.settings()``).
         spend_key: The agent's x402 spend key (defaults to the client's ``spend_key``).
         account_id: Paying account (defaults to the client's ``account_id``).
         mandate_id: Mandate to pay under, if any.
@@ -60,7 +61,8 @@ class AsyncX402Transport(httpx.AsyncBaseTransport):
 
     Raises:
         ConfigurationError: No spend key or account is configured.
-        MainnetLockedError: ``network`` is a mainnet.
+        MainnetLockedError: ``network`` is a mainnet (a mainnet deployment is
+            refused when the first challenge is paid).
     """
 
     def __init__(
@@ -68,7 +70,7 @@ class AsyncX402Transport(httpx.AsyncBaseTransport):
         bank: AsyncAgentBank,
         *,
         max_amount: str | Decimal = DEFAULT_MAX_AMOUNT_PER_REQUEST,
-        network: str = DEFAULT_X402_NETWORK,
+        network: str | None = None,
         spend_key: SignerLike | SessionKey | None = None,
         account_id: str | None = None,
         mandate_id: str | None = None,
@@ -84,7 +86,8 @@ class AsyncX402Transport(httpx.AsyncBaseTransport):
         resolved_account = account_id or bank.account_id
         if not resolved_account:
             raise ConfigurationError("x402 payments need account_id (or a client account_id)")
-        chain_for_network(network)  # refuses mainnets and unknown networks up front
+        if network is not None:
+            chain_for_network(network)  # refuses mainnets and unknown networks up front
         self._bank = bank
         self._signer = signer
         self._account_id = resolved_account
@@ -105,6 +108,7 @@ class AsyncX402Transport(httpx.AsyncBaseTransport):
                 the authorization does not match it, or the seller rejects the
                 payment (``payment_rejected``).
             PaymentDeniedError: Agent Bank's policy denied the payment.
+            MainnetLockedError: The deployment (``GET /v1/meta``) is on a mainnet.
         """
         await request.aread()  # buffer the body so the request can be replayed
         response = await self._transport.handle_async_request(request)
@@ -116,12 +120,14 @@ class AsyncX402Transport(httpx.AsyncBaseTransport):
             await response.aclose()
 
         challenge = parse_payment_required(response.headers, response.content)
+        settings = await self._bank.x402.settings(self._network)
         selected = select_requirement(
             challenge,
             request_url=str(request.url),
             max_amount=self._max_amount,
-            network=self._network,
+            network=settings.network,
             allowed_domains=self._allowed_domains,
+            usdc=settings.usdc,
         )
         authorization = await self._bank.x402.pay(
             account_id=self._account_id,

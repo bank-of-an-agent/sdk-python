@@ -78,11 +78,19 @@ operations) and aligned with the TypeScript SDK (`@agentbank/sdk`). Testnet
 - x402 pay-per-call: `X402Transport` / `AsyncX402Transport` for `httpx`, and
   `client.x402.client()` / `fetch()`. Parses x402 v2 `PAYMENT-REQUIRED` headers
   and v1 JSON bodies, picks the cheapest `exact` USDC (EIP-3009) option on the
-  configured network, enforces a client-side `max_amount` (default 1.00 USDC)
+  network it pays on, enforces a client-side `max_amount` (default 1.00 USDC)
   and optional domain allowlist, checks the EIP-3009 authorization returned by
-  the API against the challenge before the spend key signs it, and retries with
-  `PAYMENT-SIGNATURE` (v2) or `X-PAYMENT` (v1). `X402Error.reason` uses the
-  TypeScript SDK's reasons (`payment_rejected` when the seller refuses).
+  the API against the challenge (and the USDC EIP-712 domain) before the spend
+  key signs it, and retries with `PAYMENT-SIGNATURE` (v2) or `X-PAYMENT` (v1).
+  `X402Error.reason` uses the TypeScript SDK's reasons (`payment_rejected` when
+  the seller refuses).
+- x402 pays on the deployment's network and USDC by default: without an
+  explicit `network=`, `client.x402.settings()` resolves them from
+  `GET /v1/meta` (`caip2`, `usdc.address`, `usdc.eip712_name`,
+  `usdc.eip712_version`) on the first 402, cached on the client, so a local
+  sandbox on the simulated chain (`eip155:1337`) or Anvil works without
+  configuration. An explicit `network=` still wins; mainnets are refused either
+  way.
 - `generate_session_key()`, `generate_spend_key()` and `SessionKey` (0600 key
   files, environment loading, private key hidden from `repr`).
 - Webhook verification: `verify_webhook()`, `construct_event()`, `sign_webhook()`.

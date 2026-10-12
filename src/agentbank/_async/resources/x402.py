@@ -13,6 +13,8 @@ from agentbank._async.resources._base import AsyncAPIResource
 from agentbank._async.x402 import AsyncX402Transport
 from agentbank._base_client import RequestOptions
 from agentbank._resource_helpers import compact
+from agentbank.chains import USDC, chain_for_network
+from agentbank.errors import ConfigurationError
 from agentbank.keys import SessionKey, SignerLike
 from agentbank.models import (
     X402Payee,
@@ -24,7 +26,12 @@ from agentbank.models import (
     X402SupportedResponse,
     X402VerifyResponse,
 )
-from agentbank.x402 import DEFAULT_MAX_AMOUNT_PER_REQUEST, DEFAULT_X402_NETWORK, X402Receipt
+from agentbank.x402 import (
+    DEFAULT_MAX_AMOUNT_PER_REQUEST,
+    X402Receipt,
+    X402Settings,
+    x402_settings_from_meta,
+)
 
 __all__ = ["AsyncX402"]
 
@@ -123,6 +130,43 @@ class AsyncX402(AsyncAPIResource):
             ops.X402_SUPPORTED, X402SupportedResponse, request_options=request_options
         )
 
+    async def settings(
+        self, network: str | None = None, *, request_options: RequestOptions | None = None
+    ) -> X402Settings:
+        """The network and USDC this client pays x402 challenges with.
+
+        An explicit ``network`` wins, with the SDK's USDC registry for that
+        chain (or the deployment's USDC when the registry has none and
+        ``GET /v1/meta`` is on that network). Otherwise both come from
+        ``GET /v1/meta`` (``caip2``, ``usdc.address``, ``usdc.eip712_name`` and
+        ``usdc.eip712_version``), fetched once and cached on the client.
+
+        Args:
+            network: CAIP-2 network (or x402 v1 name) to pay on, if configured.
+            request_options: Per-request overrides for ``GET /v1/meta``.
+
+        Raises:
+            MainnetLockedError: The network is a mainnet.
+            ConfigurationError: No USDC is known on an explicit ``network``.
+        """
+        if network is None:
+            meta = await self._client.meta(request_options=request_options)
+            return x402_settings_from_meta(meta)
+        chain = chain_for_network(network)
+        known = USDC.get(chain.id)
+        if known is not None:
+            return X402Settings(chain=chain, usdc=known)
+        # No USDC in the registry (e.g. a MockUSDC on Anvil): the deployment's, if on this chain.
+        deployment = x402_settings_from_meta(
+            await self._client.meta(request_options=request_options)
+        )
+        if deployment.chain.id != chain.id:
+            raise ConfigurationError(
+                f"No USDC address is known for {chain.caip2} (the deployment is on "
+                f"{deployment.network}); leave network unset to pay on the deployment's network"
+            )
+        return deployment
+
     async def register_payee(
         self,
         *,
@@ -144,7 +188,7 @@ class AsyncX402(AsyncAPIResource):
         self,
         *,
         max_amount: str | Decimal = DEFAULT_MAX_AMOUNT_PER_REQUEST,
-        network: str = DEFAULT_X402_NETWORK,
+        network: str | None = None,
         spend_key: SignerLike | SessionKey | None = None,
         account_id: str | None = None,
         mandate_id: str | None = None,
@@ -172,7 +216,7 @@ class AsyncX402(AsyncAPIResource):
         self,
         *,
         max_amount: str | Decimal = DEFAULT_MAX_AMOUNT_PER_REQUEST,
-        network: str = DEFAULT_X402_NETWORK,
+        network: str | None = None,
         spend_key: SignerLike | SessionKey | None = None,
         account_id: str | None = None,
         mandate_id: str | None = None,
@@ -206,7 +250,7 @@ class AsyncX402(AsyncAPIResource):
         headers: Mapping[str, str] | None = None,
         content: bytes | str | None = None,
         json: Any = None,
-        network: str = DEFAULT_X402_NETWORK,
+        network: str | None = None,
         spend_key: SignerLike | SessionKey | None = None,
         account_id: str | None = None,
         mandate_id: str | None = None,

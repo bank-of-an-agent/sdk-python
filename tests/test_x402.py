@@ -32,11 +32,13 @@ from agentbank import (
     X402Transport,
     x402_receipt,
 )
+from agentbank.chains import USDC as USDC_REGISTRY
 from agentbank.eip712 import transfer_with_authorization_typed_data
-from agentbank.models import X402PayResponse
+from agentbank.models import Meta, X402PayResponse
 from agentbank.x402 import (
     PaymentRequired,
     SelectedRequirement,
+    X402Settings,
     build_payment_header,
     decode_header,
     decode_payment_response,
@@ -44,6 +46,7 @@ from agentbank.x402 import (
     parse_payment_required,
     rejection_reason,
     select_requirement,
+    x402_settings_from_meta,
 )
 from tests.conftest import (
     ACCOUNT_ID,
@@ -89,6 +92,37 @@ REQUIREMENT_V1: dict[str, Any] = {
 RESOURCE_INFO = {"url": RESOURCE_URL, "description": "Daily report", "mimeType": "application/json"}
 DOMAIN = {"name": "USDC", "version": "2", "chainId": 84532, "verifyingContract": USDC}
 
+#: A seller on the simulated chain the local sandbox runs (eip155:1337).
+SIMULATED_REQUIREMENT = {**REQUIREMENT_V2, "network": "eip155:1337", "asset": SIMULATED_USDC}
+SIMULATED_DOMAIN = {**DOMAIN, "chainId": 1337, "verifyingContract": SIMULATED_USDC}
+#: A MockUSDC deployed on Anvil: not in the SDK's USDC registry.
+ANVIL_USDC = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+ANVIL_REQUIREMENT = {**REQUIREMENT_V2, "network": "eip155:31337", "asset": ANVIL_USDC}
+ANVIL_DOMAIN = {**DOMAIN, "chainId": 31337, "verifyingContract": ANVIL_USDC}
+
+
+def meta_response(
+    *,
+    chain: str = "base-sepolia",
+    chain_id: int = 84532,
+    caip2: str | None = None,
+    usdc: str = USDC,
+    name: str = "USDC",
+    version: str = "2",
+) -> dict[str, Any]:
+    """``GET /v1/meta`` of a deployment."""
+    return example(
+        "Meta",
+        chain=chain,
+        chain_id=chain_id,
+        caip2=caip2 or f"eip155:{chain_id}",
+        owner_authorization_chain_id=chain_id,
+        usdc={"address": usdc, "decimals": 6, "eip712_name": name, "eip712_version": version},
+    )
+
+
+SIMULATED_META = meta_response(chain="simulated", chain_id=1337, usdc=SIMULATED_USDC)
+
 
 def payment_required_v2(*accepts: dict[str, Any]) -> dict[str, Any]:
     return {
@@ -100,7 +134,10 @@ def payment_required_v2(*accepts: dict[str, Any]) -> dict[str, Any]:
 
 
 def pay_response(
-    status: str = "requires_signature", **authorization_overrides: Any
+    status: str = "requires_signature",
+    *,
+    domain: dict[str, Any] | None = None,
+    **authorization_overrides: Any,
 ) -> dict[str, Any]:
     now = int(time.time())
     authorization = {
@@ -118,7 +155,7 @@ def pay_response(
             "Payment", id=X402_PAYMENT_ID, kind="x402", status=status, decision=None
         ),
         "authorization": authorization,
-        "eip712_domain": dict(DOMAIN),
+        "eip712_domain": dict(domain or DOMAIN),
     }
 
 
@@ -264,6 +301,7 @@ def test_amount_guard() -> None:
         ({"network": "solana-devnet"}, "Unknown network"),
         ({"network": None}, "missing network"),
         ({"asset": "0x" + "22" * 20}, "is not USDC"),
+        ({"asset": None}, "asset None is not USDC"),
         ({"extra": {"assetTransferMethod": "permit2"}}, "transfer method"),
         ({"amount": "0"}, "invalid amount"),
         ({"amount": "1.5"}, "invalid amount"),
@@ -458,9 +496,18 @@ def test_decode_payment_response_and_rejection_reasons() -> None:
 class Seller:
     """A mocked x402 seller that verifies payments like a facilitator would."""
 
-    def __init__(self, version: int = 2, *, reject: bool = False) -> None:
+    def __init__(
+        self,
+        version: int = 2,
+        *,
+        reject: bool = False,
+        requirement: dict[str, Any] = REQUIREMENT_V2,
+        domain: dict[str, Any] = DOMAIN,
+    ) -> None:
         self.version = version
         self.reject = reject
+        self.requirement = requirement
+        self.domain = domain
         self.payloads: list[dict[str, Any]] = []
         self.bodies: list[bytes] = []
 
@@ -469,9 +516,8 @@ class Seller:
         header = request.headers.get("payment-signature" if self.version == 2 else "x-payment")
         if header is None:
             if self.version == 2:
-                return httpx.Response(
-                    402, headers={"PAYMENT-REQUIRED": encode_header(payment_required_v2())}
-                )
+                challenge = payment_required_v2(self.requirement)
+                return httpx.Response(402, headers={"PAYMENT-REQUIRED": encode_header(challenge)})
             return httpx.Response(
                 402,
                 json={
@@ -482,20 +528,20 @@ class Seller:
             )
         payload = decode_header(header)
         self.payloads.append(payload)
-        assert recover_payer(payload, DOMAIN) == SPEND_ADDRESS
+        assert recover_payer(payload, self.domain) == SPEND_ADDRESS
         name = "PAYMENT-RESPONSE" if self.version == 2 else "X-PAYMENT-RESPONSE"
         if self.reject:
             failure = {
                 "success": False,
                 "errorReason": "authorization_used",
                 "transaction": "",
-                "network": "eip155:84532",
+                "network": self.requirement["network"],
             }
             return httpx.Response(402, headers={name: encode_header(failure)})
         settlement = {
             "success": True,
             "transaction": "0x" + "cd" * 32,
-            "network": "eip155:84532",
+            "network": self.requirement["network"],
             "payer": SPEND_ADDRESS,
         }
         return httpx.Response(200, json={"report": "ok"}, headers={name: encode_header(settlement)})
@@ -504,16 +550,23 @@ class Seller:
 @pytest.fixture
 def router() -> Iterator[respx.MockRouter]:
     with respx.mock(assert_all_called=False) as mock:
+        # The deployment transports pay on by default (GET /v1/meta): Base Sepolia.
+        mock.get(f"{BASE_URL}/v1/meta", name="meta").respond(json=meta_response())
         yield mock
 
 
-def mock_api(router: respx.MockRouter, response: dict[str, Any] | None = None) -> respx.Route:
+def mock_api(
+    router: respx.MockRouter,
+    response: dict[str, Any] | None = None,
+    *,
+    network: str = "eip155:84532",
+) -> respx.Route:
     def pay(request: httpx.Request) -> httpx.Response:
         verify_agent_request(request)
         body = json.loads(request.content)
         assert body["account_id"] == ACCOUNT_ID
         assert body["resource"]["url"] == RESOURCE_URL
-        assert body["requirements"]["network"] == "eip155:84532"
+        assert body["requirements"]["network"] == network
         assert body["requirements"]["amount"] == "10000"
         return httpx.Response(200, json=response or pay_response())
 
@@ -707,3 +760,175 @@ async def test_async_transport_guards_and_rejections(
         with pytest.raises(ConfigurationError):
             bank.x402.transport(max_amount="1.00")
     assert api.call_count == 1
+
+
+# --------------------------------------------------------------------- network resolution
+
+
+def test_settings_from_meta() -> None:
+    settings = x402_settings_from_meta(Meta.model_validate(SIMULATED_META))
+    assert isinstance(settings, X402Settings)
+    assert settings.network == "eip155:1337"
+    assert settings.chain.name == "simulated"
+    assert settings.usdc.address.lower() == SIMULATED_USDC
+    assert settings.usdc.address != SIMULATED_USDC  # checksummed
+    assert (settings.usdc.eip712_name, settings.usdc.eip712_version) == ("USDC", "2")
+    with pytest.raises(MainnetLockedError):
+        x402_settings_from_meta(Meta.model_validate(meta_response(chain_id=8453)))
+    inconsistent = Meta.model_validate(meta_response(chain_id=84532, caip2="eip155:1337"))
+    with pytest.raises(AgentBankError, match="names network 'eip155:1337' but chain id 84532"):
+        x402_settings_from_meta(inconsistent)
+
+
+def test_select_requirement_with_the_deployment_usdc() -> None:
+    anvil = x402_settings_from_meta(
+        Meta.model_validate(meta_response(chain="anvil", chain_id=31337, usdc=ANVIL_USDC))
+    )
+    offered = challenge(ANVIL_REQUIREMENT, {**ANVIL_REQUIREMENT, "asset": "0x" + "77" * 20})
+    picked = select_requirement(
+        offered,
+        request_url=RESOURCE_URL,
+        max_amount=50_000,
+        network=anvil.network,
+        usdc=anvil.usdc,
+    )
+    assert picked.asset == anvil.usdc
+    assert picked.requirements["network"] == "eip155:31337"
+    # The registry knows no USDC on Anvil: without the deployment's, nothing is acceptable.
+    with pytest.raises(X402Error, match="is not USDC on Local Anvil"):
+        select_requirement(
+            offered, request_url=RESOURCE_URL, max_amount=50_000, network="eip155:31337"
+        )
+    with pytest.raises(ConfigurationError, match="usdc is on chain 31337, not eip155:84532"):
+        select_requirement(offered, request_url=RESOURCE_URL, max_amount=50_000, usdc=anvil.usdc)
+
+
+def test_transport_pays_on_the_deployment_network(
+    router: respx.MockRouter, agent: AgentBank
+) -> None:
+    router["meta"].respond(json=SIMULATED_META)
+    router.get(RESOURCE_URL).mock(
+        side_effect=Seller(requirement=SIMULATED_REQUIREMENT, domain=SIMULATED_DOMAIN)
+    )
+    api = mock_api(router, pay_response(domain=SIMULATED_DOMAIN), network="eip155:1337")
+    with agent.x402.client(max_amount="0.05") as http:
+        first = http.get(RESOURCE_URL)
+        second = http.get(RESOURCE_URL)
+    assert first.status_code == second.status_code == 200
+    receipt = x402_receipt(first)
+    assert receipt is not None
+    assert receipt.requirement.chain.id == 1337
+    assert receipt.requirement.asset.address.lower() == SIMULATED_USDC
+    assert receipt.settlement is not None
+    assert receipt.settlement["network"] == "eip155:1337"
+    assert api.call_count == 2
+    assert router["meta"].call_count == 1  # resolved once, cached on the client
+    assert agent.x402.settings().network == "eip155:1337"
+    assert router["meta"].call_count == 1
+
+
+def test_explicit_network_wins_over_the_deployment(
+    router: respx.MockRouter, agent: AgentBank
+) -> None:
+    router["meta"].respond(json=SIMULATED_META)
+    router.get(RESOURCE_URL).mock(side_effect=Seller())  # a Base Sepolia seller
+    api = mock_api(router)
+    with pytest.raises(X402Error) as wrong_chain:
+        agent.x402.fetch(RESOURCE_URL, max_amount="0.05")
+    assert wrong_chain.value.reason == "no_acceptable_requirement"
+    assert "is not eip155:1337" in wrong_chain.value.detail
+    assert api.call_count == 0
+    calls = router["meta"].call_count
+    with agent.x402.client(max_amount="0.05", network="eip155:84532") as http:
+        paid = http.get(RESOURCE_URL)
+    assert paid.status_code == 200
+    assert api.call_count == 1
+    assert router["meta"].call_count == calls  # an explicit network needs no GET /v1/meta
+    assert agent.x402.settings("base-sepolia").usdc == USDC_REGISTRY[84532]
+
+
+def test_anvil_usdc_comes_from_the_deployment(router: respx.MockRouter, agent: AgentBank) -> None:
+    router["meta"].respond(json=meta_response(chain="anvil", chain_id=31337, usdc=ANVIL_USDC))
+    router.get(RESOURCE_URL).mock(
+        side_effect=Seller(requirement=ANVIL_REQUIREMENT, domain=ANVIL_DOMAIN)
+    )
+    mock_api(router, pay_response(domain=ANVIL_DOMAIN), network="eip155:31337")
+    assert agent.x402.fetch(RESOURCE_URL, max_amount="0.05").status_code == 200
+    # Explicitly on Anvil: the registry has no USDC there, so the deployment's is used.
+    explicit = agent.x402.fetch(RESOURCE_URL, max_amount="0.05", network="eip155:31337")
+    assert explicit.status_code == 200
+    assert agent.x402.settings("eip155:31337").usdc.address == ANVIL_USDC
+    # Explicitly on Anvil while the deployment is elsewhere: no USDC is known.
+    router["meta"].respond(json=SIMULATED_META)
+    agent.meta(refresh=True)
+    with pytest.raises(ConfigurationError, match="No USDC address is known for eip155:31337"):
+        agent.x402.settings("eip155:31337")
+
+
+def test_mainnet_deployments_are_refused(router: respx.MockRouter, agent: AgentBank) -> None:
+    router["meta"].respond(json=meta_response(chain_id=8453))
+    router.get(RESOURCE_URL).mock(side_effect=Seller())
+    api = mock_api(router)
+    with pytest.raises(MainnetLockedError):
+        agent.x402.fetch(RESOURCE_URL, max_amount="0.05")
+    assert api.call_count == 0
+
+
+def test_authorization_must_use_the_deployment_usdc_domain(
+    router: respx.MockRouter, agent: AgentBank
+) -> None:
+    router["meta"].respond(json=meta_response(name="USD Coin"))
+    router.get(RESOURCE_URL).mock(side_effect=Seller())
+    mock_api(router)  # Agent Bank answers with the domain name "USDC"
+    with pytest.raises(X402Error, match="not the deployment's USDC domain") as excinfo:
+        agent.x402.fetch(RESOURCE_URL, max_amount="0.05")
+    assert excinfo.value.reason == "authorization_mismatch"
+
+
+async def test_async_transport_pays_on_the_deployment_network(
+    router: respx.MockRouter, async_agent: AsyncAgentBank
+) -> None:
+    router["meta"].respond(json=SIMULATED_META)
+    router.get(RESOURCE_URL).mock(
+        side_effect=Seller(requirement=SIMULATED_REQUIREMENT, domain=SIMULATED_DOMAIN)
+    )
+    api = mock_api(router, pay_response(domain=SIMULATED_DOMAIN), network="eip155:1337")
+    async with async_agent.x402.client(max_amount="0.05") as http:
+        response = await http.get(RESOURCE_URL)
+    assert response.status_code == 200
+    receipt = x402_receipt(response)
+    assert receipt is not None
+    assert receipt.requirement.chain.id == 1337
+    assert api.call_count == 1
+    assert (await async_agent.x402.settings()).network == "eip155:1337"
+    assert router["meta"].call_count == 1
+
+    # An explicit network still wins: a Base Sepolia seller is paid on Base Sepolia.
+    router.get(RESOURCE_URL).mock(side_effect=Seller())
+    mock_api(router)
+    explicit = await async_agent.x402.fetch(RESOURCE_URL, max_amount="0.05", network="eip155:84532")
+    assert explicit.status_code == 200
+    assert router["meta"].call_count == 1
+    with pytest.raises(X402Error) as wrong_chain:
+        await async_agent.x402.fetch(RESOURCE_URL, max_amount="0.05")
+    assert wrong_chain.value.reason == "no_acceptable_requirement"
+
+
+async def test_async_settings_resolution(
+    router: respx.MockRouter, async_agent: AsyncAgentBank
+) -> None:
+    anvil_meta = meta_response(chain="anvil", chain_id=31337, usdc=ANVIL_USDC)
+    router["meta"].respond(json=anvil_meta)
+    assert (await async_agent.x402.settings("eip155:1337")).usdc == USDC_REGISTRY[1337]
+    assert not router["meta"].called
+    anvil = await async_agent.x402.settings("anvil")
+    assert anvil.usdc.address == ANVIL_USDC
+    assert anvil.usdc.chain_id == 31337
+    router["meta"].respond(json=SIMULATED_META)
+    await async_agent.meta(refresh=True)
+    with pytest.raises(ConfigurationError, match="No USDC address is known"):
+        await async_agent.x402.settings("eip155:31337")
+    router["meta"].respond(json=meta_response(chain_id=8453))
+    await async_agent.meta(refresh=True)
+    with pytest.raises(MainnetLockedError):
+        await async_agent.x402.settings()

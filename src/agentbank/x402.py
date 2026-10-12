@@ -7,9 +7,11 @@ The flow, implemented by :class:`agentbank.X402Transport` and
    ``PaymentRequired`` in the ``PAYMENT-REQUIRED`` header; x402 v1 sends it as
    the JSON body (and expects the payment in ``X-PAYMENT``).
 2. :func:`select_requirement` picks the cheapest ``exact`` USDC (EIP-3009)
-   requirement on the configured network (Base Sepolia by default) and refuses
-   it if the price exceeds the client's ``max_amount`` (1.00 USDC by default) or
-   the host is not in ``allowed_domains``. Mainnets are refused.
+   requirement on the network the client pays on and refuses it if the price
+   exceeds the client's ``max_amount`` (1.00 USDC by default) or the host is
+   not in ``allowed_domains``. Transports pay on the deployment's network and
+   USDC from ``GET /v1/meta`` unless a ``network`` is configured
+   (:class:`X402Settings`). Mainnets are refused.
 3. The agent asks Agent Bank (``POST /v1/x402/pay``) to authorize the payment;
    policy (domain allowlists, caps, velocity, mandates) runs server-side and the
    API either denies it or returns an EIP-3009 ``TransferWithAuthorization`` for
@@ -35,12 +37,14 @@ from dataclasses import dataclass
 from typing import Any, Final
 from urllib.parse import urlsplit
 
+from eth_utils.address import to_checksum_address
+
 from agentbank._resource_helpers import denied_error
 from agentbank.chains import AssetInfo, ChainInfo, chain_for_network, find_asset
 from agentbank.eip712 import transfer_with_authorization_typed_data
-from agentbank.errors import AgentBankError, X402Error
+from agentbank.errors import AgentBankError, ConfigurationError, X402Error
 from agentbank.keys import EthSigner, sign_typed_data
-from agentbank.models import Payment, X402PayResponse
+from agentbank.models import Meta, Payment, X402PayResponse
 from agentbank.money import format_amount
 
 __all__ = [
@@ -56,6 +60,7 @@ __all__ = [
     "PaymentRequired",
     "SelectedRequirement",
     "X402Receipt",
+    "X402Settings",
     "authorization_problems",
     "build_payment_header",
     "decode_header",
@@ -65,6 +70,7 @@ __all__ = [
     "rejection_reason",
     "select_requirement",
     "x402_receipt",
+    "x402_settings_from_meta",
 ]
 
 PAYMENT_REQUIRED_HEADER: Final = "PAYMENT-REQUIRED"
@@ -76,7 +82,8 @@ V1_PAYMENT_RESPONSE_HEADER: Final = "X-PAYMENT-RESPONSE"
 #: Key under which transports attach an :class:`X402Receipt` to ``response.extensions``.
 RECEIPT_EXTENSION: Final = "agentbank.x402"
 
-#: Default x402 network: Base Sepolia.
+#: Default network of :func:`select_requirement`: Base Sepolia. Transports pay
+#: on the deployment's network (``GET /v1/meta``) unless one is configured.
 DEFAULT_X402_NETWORK: Final = "eip155:84532"
 
 #: Default client-side ceiling per paid request, in USDC (as in the TypeScript SDK).
@@ -191,6 +198,54 @@ def parse_payment_required(headers: Mapping[str, str], body: bytes | str) -> Pay
 
 
 @dataclass(frozen=True)
+class X402Settings:
+    """The network and USDC deployment an x402 client pays with.
+
+    Attributes:
+        chain: The (testnet) chain; ``network`` is its CAIP-2 identifier.
+        usdc: The only asset paid: USDC's address and EIP-712 domain on that
+            chain. The authorization Agent Bank returns must use exactly this
+            domain.
+    """
+
+    chain: ChainInfo
+    usdc: AssetInfo
+
+    @property
+    def network(self) -> str:
+        """CAIP-2 network, e.g. ``"eip155:84532"``."""
+        return self.chain.caip2
+
+
+def x402_settings_from_meta(meta: Meta) -> X402Settings:
+    """The deployment's x402 network and USDC, from ``GET /v1/meta``.
+
+    Uses ``caip2``, ``usdc.address``, ``usdc.eip712_name`` and
+    ``usdc.eip712_version``.
+
+    Raises:
+        MainnetLockedError: The deployment is on a mainnet.
+        AgentBankError: ``unsupported_chain`` when the network is unknown or
+            ``caip2`` and ``chain_id`` disagree.
+    """
+    chain = chain_for_network(meta.caip2)
+    if chain.id != meta.chain_id:
+        raise AgentBankError(
+            "unsupported_chain",
+            f"GET /v1/meta names network {meta.caip2!r} but chain id {meta.chain_id}",
+        )
+    usdc = AssetInfo(
+        code="USDC",
+        chain_id=chain.id,
+        address=str(to_checksum_address(meta.usdc.address)),
+        decimals=meta.usdc.decimals,
+        eip712_name=meta.usdc.eip712_name,
+        eip712_version=meta.usdc.eip712_version,
+    )
+    return X402Settings(chain=chain, usdc=usdc)
+
+
+@dataclass(frozen=True)
 class SelectedRequirement:
     """The requirement the client chose to pay, normalized for the Agent Bank API.
 
@@ -227,7 +282,7 @@ def _host(url: str) -> str:
 
 
 def _evaluate(
-    requirement: Mapping[str, Any], version: int, chain: ChainInfo
+    requirement: Mapping[str, Any], version: int, chain: ChainInfo, usdc: AssetInfo | None
 ) -> tuple[AssetInfo, int, str, int] | str:
     """Return ``(asset, amount, pay_to, timeout)`` or the reason it is unusable."""
     if requirement.get("scheme") != "exact":
@@ -242,7 +297,12 @@ def _evaluate(
     if offered_chain.id != chain.id:
         return f"network {network!r} is not {chain.caip2}"
     asset_address = requirement.get("asset")
-    asset = find_asset(chain.id, asset_address) if isinstance(asset_address, str) else None
+    asset: AssetInfo | None = None
+    if isinstance(asset_address, str):
+        if usdc is None:
+            asset = find_asset(chain.id, asset_address)
+        elif asset_address.lower() == usdc.address.lower():
+            asset = usdc
     if asset is None:
         return f"asset {asset_address!r} is not USDC on {chain.display_name}"
     extra = requirement.get("extra")
@@ -268,6 +328,7 @@ def select_requirement(
     max_amount: int,
     network: str = DEFAULT_X402_NETWORK,
     allowed_domains: Collection[str] | None = None,
+    usdc: AssetInfo | None = None,
 ) -> SelectedRequirement:
     """Choose which offered requirement to pay.
 
@@ -282,20 +343,25 @@ def select_requirement(
         max_amount: Client-side price ceiling in atomic units.
         network: CAIP-2 network to pay on (default Base Sepolia, ``eip155:84532``).
         allowed_domains: Optional allowlist of hosts the client may pay.
+        usdc: The USDC deployment to accept (e.g. :attr:`X402Settings.usdc`);
+            default: the SDK's registry for ``network``.
 
     Raises:
         X402Error: ``domain_not_allowed``, ``no_acceptable_requirement`` or
             ``amount_exceeds_limit``.
         MainnetLockedError: ``network`` is a mainnet.
+        ConfigurationError: ``usdc`` is on another chain than ``network``.
     """
     chain = chain_for_network(network)
+    if usdc is not None and usdc.chain_id != chain.id:
+        raise ConfigurationError(f"usdc is on chain {usdc.chain_id}, not {chain.caip2}")
     host = _host(request_url)
     if allowed_domains is not None and host not in {d.lower() for d in allowed_domains}:
         raise X402Error("domain_not_allowed", f"Paying {host!r} is not allowed by this client")
     reasons: list[str] = []
     candidates: list[tuple[int, int, AssetInfo, str, int]] = []
     for index, offered in enumerate(challenge.accepts):
-        evaluated = _evaluate(offered, challenge.x402_version, chain)
+        evaluated = _evaluate(offered, challenge.x402_version, chain, usdc)
         if isinstance(evaluated, str):
             reasons.append(evaluated)
             continue
@@ -403,6 +469,11 @@ def authorization_problems(
         problems.append("EIP-712 name differs")
     if isinstance(extra.get("version"), str) and extra["version"] != domain.version:
         problems.append("EIP-712 version differs")
+    if (domain.name, domain.version) != (
+        selected.asset.eip712_name,
+        selected.asset.eip712_version,
+    ):
+        problems.append("EIP-712 domain is not the deployment's USDC domain")
     if not _BYTES32_RE.match(auth["nonce"]):
         problems.append("nonce is not 32 bytes")
     valid_before = int(auth["validBefore"])

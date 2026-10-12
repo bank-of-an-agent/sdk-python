@@ -65,7 +65,7 @@ from agentbank.keys import EthSigner, SessionKey, generate_session_key, generate
 from agentbank.money import format_amount, money, parse_amount
 from agentbank.spend_key import sign_spend_key_permit, spend_key_permit_typed_data
 from agentbank.webhooks import WebhookEvent, construct_event, sign_webhook, verify_webhook
-from agentbank.x402 import X402Receipt, x402_receipt
+from agentbank.x402 import X402Receipt, X402Settings, x402_receipt
 
 __all__ = [
     "BASE_SEPOLIA",
@@ -107,6 +107,7 @@ __all__ = [
     "WebhookEvent",
     "X402Error",
     "X402Receipt",
+    "X402Settings",
     "X402Transport",
     "__version__",
     "assert_testnet",
