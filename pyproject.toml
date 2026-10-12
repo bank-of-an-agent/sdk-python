@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "agentbank"
 dynamic = ["version"]
 description = "Python SDK for Agent Bank: non-custodial, programmable bank accounts for AI agents (USDC on Base Sepolia)."
+readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
