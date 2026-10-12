@@ -1,0 +1,28 @@
+{
+  "description": "Generated with viem (scripts/generate_viem_vectors.mjs). Anvil dev keys only; never use for real funds.",
+  "eip3009": {
+    "spend_private_key": "0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6",
+    "spend_address": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+    "domain": {
+      "name": "USDC",
+      "version": "2",
+      "chainId": 84532,
+      "verifyingContract": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+    },
+    "authorization": {
+      "from": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+      "to": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+      "value": "10000",
+      "validAfter": "0",
+      "validBefore": "1790000060",
+      "nonce": "0x7ff824e27d6146eef9352674405bca74214a152a9f21cd379a6b0d33f48b83e6"
+    },
+    "signature": "0x1d5a4eba8e7a97b14ab85e1e82d27e41714c576efade054da280b2c7aecd4e24656cd996fbdaf7a4fdd10ebc75c19ab8b1152ca88a0e9322a2ee8460c368d3221b"
+  },
+  "user_op": {
+    "session_private_key": "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+    "session_address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    "user_op_hash": "0xde8c75f4a14b7f25ad85c4be7f9affb7b3ea83f0fad7b0c3fa8754dbd0e6383e",
+    "signature": "0x9f00e9783617f53eb64dedb4182a85c24a180307a0bf7a494afdc559e042c55772747fa429e7647311ebab3ce1801a844a0aae85b4cb29249434db0d9ac505ca1b"
+  }
+}
