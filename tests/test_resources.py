@@ -44,6 +44,7 @@ APR_ID = id_for("apr")
 VLT_ID = id_for("vlt")
 WHE_ID = id_for("whe")
 SIGNATURE = "0x" + "11" * 65
+PERMIT = {"value": "1000000", "deadline": "4000000000", "nonce": "0", "signature": SIGNATURE}
 AUTH = {"signer": OWNER_ADDRESS, "signature": SIGNATURE, "issued_at": 1, "expires_at": 600}
 SCOPE = {"max_per_tx": "5.00", "max_per_day": "50.00", "expires_at": "2026-10-12T00:00:00Z"}
 MANDATE = {
@@ -315,6 +316,48 @@ CASES: list[Case] = [
     Case("changePlan", "principal", lambda c: c.billing.change_plan(plan="pro")),
     Case("getFees", "principal", lambda c: c.billing.fees(period="2026-10")),
     Case("health", "principal", lambda c: c.health()),
+    # owner rotation, spend keys, new lists and the sandbox
+    Case(
+        "rotateOwner",
+        "principal",
+        lambda c: c.orgs.rotate_owner(new_owner_address=SESSION_ADDRESS, owner_authorization=AUTH),
+    ),
+    Case(
+        "attachSpendKey",
+        "principal",
+        lambda c: c.accounts.attach_spend_key(
+            ACCOUNT_ID, spend_key_address=SPEND_ADDRESS, permit=PERMIT, owner_authorization=AUTH
+        ),
+        ACCOUNT_ID,
+    ),
+    Case(
+        "prepareOwnerSwap",
+        "principal",
+        lambda c: c.owner_operations.prepare_owner_swap(
+            ACCOUNT_ID, new_owner_address=SESSION_ADDRESS
+        ),
+        ACCOUNT_ID,
+    ),
+    Case(
+        "listSessions",
+        "principal",
+        lambda c: c.sessions.list(account_id=ACCOUNT_ID, agent_id=AGENT_ID, status="active"),
+    ),
+    Case("listMandates", "principal", lambda c: c.mandates.list(agent_id=AGENT_ID)),
+    Case(
+        "listOwnerOperations",
+        "principal",
+        lambda c: c.owner_operations.list(status="requires_signature"),
+    ),
+    Case("listEscrows", "agent", lambda c: c.escrows.list(status="locked")),
+    Case("listStreams", "agent", lambda c: c.streams.list(account_id=ACCOUNT_ID)),
+    Case("listAutoTopUpRules", "principal", lambda c: c.treasury.list_auto_topup_rules()),
+    Case("getSweepRule", "principal", lambda c: c.treasury.get_sweep_rule(ACCOUNT_ID), ACCOUNT_ID),
+    Case(
+        "sandboxFaucet",
+        "principal",
+        lambda c: c.sandbox.faucet(amount="10.00", address=SPEND_ADDRESS),
+    ),
     Case("getMeta", "principal", lambda c: c.meta()),
 ]
 
@@ -444,6 +487,24 @@ ITERATORS: list[tuple[str, str, Kind, Callable[[Any], Any], str | None]] = [
         "ListEventsResponse",
         "principal",
         lambda c: c.webhooks.list_events_all(),
+        None,
+    ),
+    ("listSessions", "ListSessionsResponse", "principal", lambda c: c.sessions.list_all(), None),
+    ("listMandates", "ListMandatesResponse", "principal", lambda c: c.mandates.list_all(), None),
+    (
+        "listOwnerOperations",
+        "ListOwnerOperationsResponse",
+        "principal",
+        lambda c: c.owner_operations.list_all(),
+        None,
+    ),
+    ("listEscrows", "ListEscrowsResponse", "agent", lambda c: c.escrows.list_all(), None),
+    ("listStreams", "ListStreamsResponse", "agent", lambda c: c.streams.list_all(), None),
+    (
+        "listAutoTopUpRules",
+        "ListAutoTopUpRulesResponse",
+        "principal",
+        lambda c: c.treasury.list_auto_topup_rules_all(),
         None,
     ),
 ]

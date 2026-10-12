@@ -49,8 +49,10 @@ __all__ = [
     "agent_unfreeze",
     "mandate_issue",
     "org_unfreeze",
+    "owner_rotate",
     "policy_loosen",
     "session_grant",
+    "spend_key_set",
     "sweep_set",
     "topup_set",
     "treasury_set",
@@ -178,4 +180,30 @@ def vault_withdraw(vault_id: str, amount: MoneyInput) -> OwnerActionPayload:
     """``POST /v1/vaults/{id}/withdraw``: subject = vault id; payload ``{amount}``."""
     return OwnerActionPayload(
         action="vault.withdraw", subject=vault_id, payload={"amount": _money(amount)}
+    )
+
+
+def owner_rotate(org_id: str, new_owner_address: str) -> OwnerActionPayload:
+    """``POST /v1/orgs/me/owner``: subject = org id; payload ``{new_owner_address}``.
+
+    A voluntary rotation, signed by the **current** owner key. (Recovering a
+    lost key is an on-chain guardian recovery instead.)
+    """
+    return OwnerActionPayload(
+        action="owner.rotate",
+        subject=org_id,
+        payload={"new_owner_address": new_owner_address},
+    )
+
+
+def spend_key_set(account_id: str, spend_key_address: str) -> OwnerActionPayload:
+    """``PUT /v1/accounts/{id}/spend-key``: payload ``{account_id, spend_key_address}``.
+
+    Pins the agent's x402 spend key in the co-signer; float refills may only
+    ever go to it (ADR 0001).
+    """
+    return OwnerActionPayload(
+        action="spend_key.set",
+        subject=account_id,
+        payload={"account_id": account_id, "spend_key_address": spend_key_address},
     )

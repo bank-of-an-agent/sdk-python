@@ -4,21 +4,57 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Iterator, Mapping
+from typing import Any, Literal
 
 from agentbank import _operations as ops
 from agentbank import owner_payloads
 from agentbank._base_client import RequestOptions
 from agentbank._sync.resources._base import APIResource
 from agentbank.keys import SessionKey, SignerLike
-from agentbank.models import Mandate, OpenPaymentMandate
+from agentbank.models import ListMandatesResponse, Mandate, OpenPaymentMandate
 
 __all__ = ["Mandates"]
+
+MandateStatus = Literal["active", "expired", "revoked"]
 
 
 class Mandates(APIResource):
     """AP2 open Payment Mandates granting an agent bounded authority."""
+
+    def list(
+        self,
+        *,
+        agent_id: str | None = None,
+        status: MandateStatus | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> ListMandatesResponse:
+        """List mandates (one page)."""
+        return self._request(
+            ops.LIST_MANDATES,
+            ListMandatesResponse,
+            query={"agent_id": agent_id, "status": status, "cursor": cursor, "limit": limit},
+            request_options=request_options,
+        )
+
+    def list_all(
+        self,
+        *,
+        agent_id: str | None = None,
+        status: MandateStatus | None = None,
+        limit: int | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> Iterator[Mandate]:
+        """List mandates: iterate over every page, following ``next_cursor``."""
+        for page in self._paginate(
+            ops.LIST_MANDATES,
+            ListMandatesResponse,
+            query={"agent_id": agent_id, "status": status, "limit": limit},
+            request_options=request_options,
+        ):
+            yield from page.data
 
     def create(
         self,

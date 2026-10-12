@@ -22,11 +22,12 @@ class Ledger(APIResource):
         self,
         account_id: str | None = None,
         *,
+        payment_id: str | None = None,
         cursor: str | None = None,
         limit: int | None = None,
         request_options: RequestOptions | None = None,
     ) -> ListEntriesResponse:
-        """List ledger entries touching an account (one page).
+        """List ledger entries touching an account (one page), optionally for one payment.
 
         Defaults to the client's ``account_id``.
         """
@@ -34,7 +35,7 @@ class Ledger(APIResource):
             ops.LIST_ENTRIES,
             ListEntriesResponse,
             path_params={"id": self._account(account_id)},
-            query={"cursor": cursor, "limit": limit},
+            query={"payment_id": payment_id, "cursor": cursor, "limit": limit},
             request_options=request_options,
         )
 
@@ -42,6 +43,7 @@ class Ledger(APIResource):
         self,
         account_id: str | None = None,
         *,
+        payment_id: str | None = None,
         limit: int | None = None,
         request_options: RequestOptions | None = None,
     ) -> Iterator[LedgerEntry]:
@@ -50,7 +52,7 @@ class Ledger(APIResource):
             ops.LIST_ENTRIES,
             ListEntriesResponse,
             path_params={"id": self._account(account_id)},
-            query={"limit": limit},
+            query={"payment_id": payment_id, "limit": limit},
             request_options=request_options,
         ):
             yield from page.data

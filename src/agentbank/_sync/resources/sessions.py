@@ -4,21 +4,70 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Iterator, Mapping
+from typing import Any, Literal
 
 from agentbank import _operations as ops
 from agentbank import owner_payloads
 from agentbank._base_client import RequestOptions
 from agentbank._sync.resources._base import APIResource
 from agentbank.keys import SessionKey, SignerLike
-from agentbank.models import Session, SessionScope
+from agentbank.models import ListSessionsResponse, Session, SessionScope
 
 __all__ = ["Sessions"]
+
+SessionStatus = Literal["pending_install", "active", "expired", "revoked"]
 
 
 class Sessions(APIResource):
     """Short-lived, scoped agent keys. A session key is useless without the co-signer."""
+
+    def list(
+        self,
+        *,
+        account_id: str | None = None,
+        agent_id: str | None = None,
+        status: SessionStatus | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> ListSessionsResponse:
+        """List sessions (one page)."""
+        return self._request(
+            ops.LIST_SESSIONS,
+            ListSessionsResponse,
+            query={
+                "account_id": account_id,
+                "agent_id": agent_id,
+                "status": status,
+                "cursor": cursor,
+                "limit": limit,
+            },
+            request_options=request_options,
+        )
+
+    def list_all(
+        self,
+        *,
+        account_id: str | None = None,
+        agent_id: str | None = None,
+        status: SessionStatus | None = None,
+        limit: int | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> Iterator[Session]:
+        """List sessions: iterate over every page, following ``next_cursor``."""
+        for page in self._paginate(
+            ops.LIST_SESSIONS,
+            ListSessionsResponse,
+            query={
+                "account_id": account_id,
+                "agent_id": agent_id,
+                "status": status,
+                "limit": limit,
+            },
+            request_options=request_options,
+        ):
+            yield from page.data
 
     def create(
         self,

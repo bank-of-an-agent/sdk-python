@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from datetime import datetime
 from typing import Any, Literal
 
@@ -19,10 +19,22 @@ from agentbank._resource_helpers import (
 from agentbank._resource_helpers import payee as normalize_payee
 from agentbank._sync.resources._base import APIResource
 from agentbank.errors import PaymentFailedError
-from agentbank.models import Escrow
+from agentbank.models import Escrow, ListEscrowsResponse
 from agentbank.money import MoneyInput, coerce_money
 
 __all__ = ["Escrows"]
+
+EscrowStatus = Literal[
+    "requires_signature",
+    "locking",
+    "locked",
+    "released",
+    "refunded",
+    "disputed",
+    "resolved",
+    "failed",
+    "canceled",
+]
 
 
 class Escrows(APIResource):
@@ -33,6 +45,40 @@ class Escrows(APIResource):
     payments; call :meth:`sign_and_submit` afterwards. :meth:`lock` creates and
     signs in one call.
     """
+
+    def list(
+        self,
+        *,
+        account_id: str | None = None,
+        status: EscrowStatus | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> ListEscrowsResponse:
+        """List escrows (one page)."""
+        return self._request(
+            ops.LIST_ESCROWS,
+            ListEscrowsResponse,
+            query={"account_id": account_id, "status": status, "cursor": cursor, "limit": limit},
+            request_options=request_options,
+        )
+
+    def list_all(
+        self,
+        *,
+        account_id: str | None = None,
+        status: EscrowStatus | None = None,
+        limit: int | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> Iterator[Escrow]:
+        """List escrows: iterate over every page, following ``next_cursor``."""
+        for page in self._paginate(
+            ops.LIST_ESCROWS,
+            ListEscrowsResponse,
+            query={"account_id": account_id, "status": status, "limit": limit},
+            request_options=request_options,
+        ):
+            yield from page.data
 
     def create(
         self,

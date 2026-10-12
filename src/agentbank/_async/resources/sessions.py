@@ -2,21 +2,71 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import AsyncIterator, Mapping
+from typing import Any, Literal
 
 from agentbank import _operations as ops
 from agentbank import owner_payloads
 from agentbank._async.resources._base import AsyncAPIResource
 from agentbank._base_client import RequestOptions
 from agentbank.keys import SessionKey, SignerLike
-from agentbank.models import Session, SessionScope
+from agentbank.models import ListSessionsResponse, Session, SessionScope
 
 __all__ = ["AsyncSessions"]
+
+SessionStatus = Literal["pending_install", "active", "expired", "revoked"]
 
 
 class AsyncSessions(AsyncAPIResource):
     """Short-lived, scoped agent keys. A session key is useless without the co-signer."""
+
+    async def list(
+        self,
+        *,
+        account_id: str | None = None,
+        agent_id: str | None = None,
+        status: SessionStatus | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> ListSessionsResponse:
+        """List sessions (one page)."""
+        return await self._request(
+            ops.LIST_SESSIONS,
+            ListSessionsResponse,
+            query={
+                "account_id": account_id,
+                "agent_id": agent_id,
+                "status": status,
+                "cursor": cursor,
+                "limit": limit,
+            },
+            request_options=request_options,
+        )
+
+    async def list_all(
+        self,
+        *,
+        account_id: str | None = None,
+        agent_id: str | None = None,
+        status: SessionStatus | None = None,
+        limit: int | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> AsyncIterator[Session]:
+        """List sessions: iterate over every page, following ``next_cursor``."""
+        async for page in self._paginate(
+            ops.LIST_SESSIONS,
+            ListSessionsResponse,
+            query={
+                "account_id": account_id,
+                "agent_id": agent_id,
+                "status": status,
+                "limit": limit,
+            },
+            request_options=request_options,
+        ):
+            for item in page.data:
+                yield item
 
     async def create(
         self,

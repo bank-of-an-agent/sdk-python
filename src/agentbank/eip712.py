@@ -48,6 +48,8 @@ OwnerAction = Literal[
     "sweep.set",
     "treasury.set",
     "vault.withdraw",
+    "owner.rotate",
+    "spend_key.set",
 ]
 
 #: Every action an owner authorization can carry.

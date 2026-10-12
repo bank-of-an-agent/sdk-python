@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any, Literal
 
 from agentbank import _operations as ops
@@ -10,7 +11,14 @@ from agentbank._async.resources._base import AsyncAPIResource
 from agentbank._base_client import RequestOptions
 from agentbank._resource_helpers import compact
 from agentbank.keys import SessionKey, SignerLike
-from agentbank.models import Account, AutoTopUpRule, ListFundsResponse, Org, SweepRule
+from agentbank.models import (
+    Account,
+    AutoTopUpRule,
+    ListAutoTopUpRulesResponse,
+    ListFundsResponse,
+    Org,
+    SweepRule,
+)
 from agentbank.money import MoneyInput
 
 __all__ = ["AsyncTreasury"]
@@ -124,6 +132,43 @@ class AsyncTreasury(AsyncAPIResource):
             idempotency_key=idempotency_key,
             request_options=request_options,
         )
+
+    async def list_auto_topup_rules(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> ListAutoTopUpRulesResponse:
+        """List the org's auto top-up rules (one page)."""
+        return await self._request(
+            ops.LIST_AUTO_TOP_UP_RULES,
+            ListAutoTopUpRulesResponse,
+            query={"cursor": cursor, "limit": limit},
+            request_options=request_options,
+        )
+
+    async def list_auto_topup_rules_all(
+        self, *, limit: int | None = None, request_options: RequestOptions | None = None
+    ) -> AsyncIterator[AutoTopUpRule]:
+        """Iterate over every auto top-up rule, following ``next_cursor``."""
+        async for page in self._paginate(
+            ops.LIST_AUTO_TOP_UP_RULES,
+            ListAutoTopUpRulesResponse,
+            query={"limit": limit},
+            request_options=request_options,
+        ):
+            for item in page.data:
+                yield item
+
+    async def get_sweep_rule(
+        self, account_id: str, *, request_options: RequestOptions | None = None
+    ) -> SweepRule | None:
+        """Get the account's treasury sweep rule, or ``None`` if it has none."""
+        data = await self._client._request_json(
+            ops.GET_SWEEP_RULE, path_params={"id": account_id}, request_options=request_options
+        )
+        return None if data is None else SweepRule.model_validate(data)
 
     async def list_funds(
         self, *, request_options: RequestOptions | None = None

@@ -27,7 +27,7 @@ from agentbank._base_client import (
 )
 from agentbank._resource_helpers import require_session_for
 from agentbank._spec import Operation
-from agentbank._sync.resources.accounts import Accounts
+from agentbank._sync.resources.accounts import Accounts, ChainName
 from agentbank._sync.resources.agents import Agents
 from agentbank._sync.resources.api_keys import ApiKeys
 from agentbank._sync.resources.approvals import Approvals
@@ -45,6 +45,7 @@ from agentbank._sync.resources.payments import (
     Payments,
 )
 from agentbank._sync.resources.policies import Policies
+from agentbank._sync.resources.sandbox import Sandbox
 from agentbank._sync.resources.sessions import Sessions
 from agentbank._sync.resources.streams import Streams
 from agentbank._sync.resources.treasury import Treasury
@@ -52,11 +53,34 @@ from agentbank._sync.resources.vaults import Vaults
 from agentbank._sync.resources.webhooks import Webhooks
 from agentbank._sync.resources.x402 import X402
 from agentbank.chains import assert_testnet
-from agentbank.errors import APIConnectionError, APITimeoutError, error_from_response
+from agentbank.errors import (
+    APIConnectionError,
+    APITimeoutError,
+    BadRequestError,
+    ConfigurationError,
+    error_from_response,
+)
+from agentbank.flows import (
+    DEFAULT_SESSION_TTL_SECONDS,
+    GrantSessionResult,
+    PermitOptions,
+    SessionGrant,
+    SetupAgentAccountResult,
+    session_scope_with_expiry,
+)
 from agentbank.http_signatures import DEFAULT_SIGNATURE_LIFETIME_SECONDS
-from agentbank.keys import SessionKey, SignerLike, personal_sign_hash
-from agentbank.models import HealthResponse, Meta, Payment, PaymentDestination, SigningRequest
+from agentbank.keys import SessionKey, SignerLike, personal_sign_hash, to_signer
+from agentbank.models import (
+    Account,
+    HealthResponse,
+    Meta,
+    Payment,
+    PaymentDestination,
+    SessionScope,
+    SigningRequest,
+)
 from agentbank.money import MoneyInput
+from agentbank.spend_key import MAX_UINT256, sign_spend_key_permit
 
 __all__ = ["AgentBank"]
 
@@ -120,6 +144,7 @@ class AgentBank:
     treasury: Treasury
     webhooks: Webhooks
     billing: Billing
+    sandbox: Sandbox
 
     def __init__(
         self,
@@ -175,6 +200,7 @@ class AgentBank:
         self.treasury = Treasury(self)
         self.webhooks = Webhooks(self)
         self.billing = Billing(self)
+        self.sandbox = Sandbox(self)
 
     # ------------------------------------------------------------------ properties
 
@@ -329,6 +355,278 @@ class AgentBank:
             request_options=request_options,
         )
 
+    # ------------------------------------------------------------------ principal flows
+
+    def spend_key_permit(
+        self,
+        account: Account | str,
+        spend_key: SignerLike | SessionKey,
+        *,
+        nonce: int | str = 0,
+        value: int | str = MAX_UINT256,
+        deadline: int | str = MAX_UINT256,
+        request_options: RequestOptions | None = None,
+    ) -> dict[str, str]:
+        """Sign the spend key's float-recovery permit for an existing account.
+
+        Spender = ``account.address``; the USDC address and EIP-712 domain come
+        from ``GET /v1/meta``. Sends nothing (see :meth:`provision_spend_key`).
+
+        Raises:
+            BadRequestError: The account is not on the deployment's chain, or the
+                permit parameters are invalid.
+        """
+        target = (
+            account
+            if isinstance(account, Account)
+            else self.accounts.retrieve(account, request_options=request_options)
+        )
+        meta = self.meta(request_options=request_options)
+        if target.chain_id != meta.chain_id:
+            raise BadRequestError(
+                "invalid_request",
+                f"Account {target.id} is on chain {target.chain_id}, but this deployment's "
+                f"USDC is on chain {meta.chain_id}",
+            )
+        return sign_spend_key_permit(
+            spend_key,
+            account=target.address,
+            chain_id=target.chain_id,
+            usdc=meta.usdc.address,
+            name=meta.usdc.eip712_name,
+            version=meta.usdc.eip712_version,
+            nonce=nonce,
+            value=value,
+            deadline=deadline,
+        )
+
+    def provision_spend_key(
+        self,
+        account_id: str,
+        spend_key: SignerLike | SessionKey,
+        *,
+        owner: SignerLike | SessionKey,
+        nonce: int | str = 0,
+        value: int | str = MAX_UINT256,
+        deadline: int | str = MAX_UINT256,
+        idempotency_key: str | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> Account:
+        """Attach an agent's x402 spend key to its account (ADR 0001).
+
+        The spend key signs the float-recovery permit for the account's address,
+        the owner key signs ``spend_key.set`` (which pins the spend key in the
+        co-signer; x402 payments and float refills are refused until then), and
+        both go to ``PUT /v1/accounts/{id}/spend-key``. The permit is executed
+        on-chain by the account's next owner operation (normally the install of
+        the first session), after which ``account.spend_key_permit`` is ``executed``.
+
+        Args:
+            account_id: The agent's account.
+            spend_key: The spend key (``generate_spend_key()``).
+            owner: The owner key (signs ``spend_key.set``).
+            nonce: USDC ``nonces(spend key)``; 0 for a fresh key.
+            value: Permit allowance (default max uint256).
+            deadline: Permit deadline (default max uint256).
+            idempotency_key: Optional key; generated when omitted.
+            request_options: Per-request overrides.
+        """
+        account = self.accounts.retrieve(account_id, request_options=request_options)
+        return self._attach_spend_key(
+            account,
+            spend_key,
+            owner=owner,
+            permit={"nonce": nonce, "value": value, "deadline": deadline},
+            idempotency_key=idempotency_key,
+            request_options=request_options,
+        )
+
+    def grant_session(
+        self,
+        *,
+        account_id: str,
+        public_key: str,
+        scope: SessionScope | Mapping[str, Any],
+        owner: SignerLike | SessionKey,
+        ttl_seconds: int = DEFAULT_SESSION_TTL_SECONDS,
+        install: bool = True,
+        wait_for_install: bool = False,
+        timeout: float = 120.0,
+        poll_interval: float = 2.0,
+        idempotency_key: str | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> GrantSessionResult:
+        """Grant an agent a session key and install it on-chain.
+
+        Signs the ``session.grant`` owner authorization over
+        ``{account_id, public_key, scope}`` (scope defaults made explicit,
+        ``expires_at`` = now + ``ttl_seconds`` when absent), registers the
+        session, prepares its on-chain install (Smart Sessions) and signs the
+        install operation with the owner key. The scope is enforced on-chain.
+
+        Args:
+            account_id: The agent's account.
+            public_key: The session key address (``generate_session_key().address``).
+            scope: ``max_per_tx``, ``max_per_day`` and optional limits and expiry.
+            owner: The owner key.
+            ttl_seconds: Lifetime when ``scope`` has no ``expires_at`` (default 24 h, max 7 days).
+            install: Prepare and sign the on-chain install (default ``True``).
+            wait_for_install: Wait until the install operation is done.
+            timeout: Seconds to wait when ``wait_for_install`` is true.
+            poll_interval: Seconds between status checks.
+            idempotency_key: Optional base key; suffixed per step (``.create``,
+                ``.install``, ``.sign``) so the whole flow can be retried safely.
+            request_options: Per-request overrides.
+        """
+        session = self.sessions.create(
+            account_id=account_id,
+            public_key=public_key,
+            scope=session_scope_with_expiry(scope, ttl_seconds),
+            owner=owner,
+            idempotency_key=_step(idempotency_key, "create"),
+            request_options=request_options,
+        )
+        if not install:
+            return GrantSessionResult(session=session, install_operation=None)
+        session = self.sessions.install(
+            session.id,
+            idempotency_key=_step(idempotency_key, "install"),
+            request_options=request_options,
+        )
+        if session.install_operation_id is None:
+            return GrantSessionResult(session=session, install_operation=None)
+        operation = self.owner_operations.sign_and_submit(
+            session.install_operation_id,
+            owner=owner,
+            wait=wait_for_install,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            idempotency_key=_step(idempotency_key, "sign"),
+            request_options=request_options,
+        )
+        if wait_for_install:
+            session = self.sessions.retrieve(session.id, request_options=request_options)
+        return GrantSessionResult(session=session, install_operation=operation)
+
+    def setup_agent_account(
+        self,
+        *,
+        agent_id: str,
+        owner: SignerLike | SessionKey | None = None,
+        chain: ChainName | None = None,
+        spend_key: SignerLike | SessionKey | None = None,
+        permit: PermitOptions | None = None,
+        session: SessionGrant | None = None,
+        idempotency_key: str | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> SetupAgentAccountResult:
+        """Provision an agent's account in the order the contracts require.
+
+        Creates the smart account; with ``spend_key``, signs the float-recovery
+        permit for its counterfactual address, has the owner authorize the
+        spend key (``spend_key.set``) and attaches both; with ``session``,
+        grants and installs the first session, whose setup owner operation also
+        executes the permit on-chain::
+
+            spend_key, session_key = generate_spend_key(), generate_session_key()
+            result = bank.setup_agent_account(
+                agent_id=agent.id,
+                owner=owner_key,
+                spend_key=spend_key,
+                session={
+                    "public_key": session_key.address,
+                    "scope": {"max_per_tx": "5.00", "max_per_day": "50.00"},
+                },
+            )
+
+        Args:
+            agent_id: The agent.
+            owner: The owner key (needed with ``spend_key`` or ``session``).
+            chain: Chain of the account (API default: Base Sepolia).
+            spend_key: The agent's x402 spend key, attached before the first session.
+            permit: Permit overrides (``nonce`` for a key that is not fresh).
+            session: The first session to grant (see :class:`~agentbank.flows.SessionGrant`).
+            idempotency_key: Optional base key; suffixed per step (``.account``,
+                ``.spend-key``, ``.session.*``) so the setup can be retried safely.
+            request_options: Per-request overrides.
+
+        Raises:
+            ConfigurationError: ``spend_key`` or ``session`` without an owner key.
+        """
+        session_owner = session.get("owner", owner) if session is not None else owner
+        if (spend_key is not None and owner is None) or (
+            session is not None and session_owner is None
+        ):
+            raise ConfigurationError("setup_agent_account needs the owner key (owner=...)")
+        account = self.accounts.create(
+            agent_id,
+            chain=chain,
+            idempotency_key=_step(idempotency_key, "account"),
+            request_options=request_options,
+        )
+        if spend_key is not None:
+            assert owner is not None
+            account = self._attach_spend_key(
+                account,
+                spend_key,
+                owner=owner,
+                permit=permit or {},
+                idempotency_key=_step(idempotency_key, "spend-key"),
+                request_options=request_options,
+            )
+        if session is None:
+            return SetupAgentAccountResult(account=account, session=None, install_operation=None)
+        assert session_owner is not None
+        granted = self.grant_session(
+            account_id=account.id,
+            public_key=session["public_key"],
+            scope=session["scope"],
+            owner=session_owner,
+            ttl_seconds=session.get("ttl_seconds", DEFAULT_SESSION_TTL_SECONDS),
+            install=session.get("install", True),
+            wait_for_install=session.get("wait_for_install", False),
+            idempotency_key=_step(idempotency_key, "session"),
+            request_options=request_options,
+        )
+        if spend_key is not None and session.get("wait_for_install", False):
+            account = self.accounts.retrieve(account.id, request_options=request_options)
+        return SetupAgentAccountResult(
+            account=account,
+            session=granted.session,
+            install_operation=granted.install_operation,
+        )
+
+    def _attach_spend_key(
+        self,
+        account: Account,
+        spend_key: SignerLike | SessionKey,
+        *,
+        owner: SignerLike | SessionKey,
+        permit: PermitOptions,
+        idempotency_key: str | None,
+        request_options: RequestOptions | None,
+    ) -> Account:
+        if account.role != "agent":
+            raise BadRequestError(
+                "invalid_request", "Spend keys are for agent accounts, not the treasury"
+            )
+        signed = self.spend_key_permit(
+            account,
+            spend_key,
+            nonce=permit.get("nonce", 0),
+            value=permit.get("value", MAX_UINT256),
+            deadline=permit.get("deadline", MAX_UINT256),
+            request_options=request_options,
+        )
+        return self.accounts.attach_spend_key(
+            account.id,
+            spend_key_address=to_signer(spend_key).address,
+            permit=signed,
+            owner=owner,
+            idempotency_key=idempotency_key,
+            request_options=request_options,
+        )
+
     # ------------------------------------------------------------------ internals
 
     def _sign_operation(self, signing_request: SigningRequest) -> tuple[str, str]:
@@ -438,3 +736,8 @@ class AgentBank:
             operation, query=query, accept=accept, options=request_options
         )
         return (self._send(prepared)).text
+
+
+def _step(idempotency_key: str | None, step: str) -> str | None:
+    """Suffix a caller-supplied idempotency key per step of a multi-call helper."""
+    return f"{idempotency_key}.{step}" if idempotency_key else None

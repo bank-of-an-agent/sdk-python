@@ -46,6 +46,8 @@ PaymentStatus = Literal[
     "expired",
 ]
 
+PaymentKind = Literal["transfer", "x402", "escrow", "stream", "payout", "refill"]
+
 DEFAULT_SETTLEMENT_TIMEOUT = 120.0
 DEFAULT_POLL_INTERVAL = 2.0
 
@@ -167,33 +169,46 @@ class Payments(APIResource):
         self,
         *,
         account_id: str | None = None,
+        agent_id: str | None = None,
+        kind: PaymentKind | None = None,
         status: PaymentStatus | None = None,
         cursor: str | None = None,
         limit: int | None = None,
         request_options: RequestOptions | None = None,
     ) -> ListPaymentsResponse:
-        """List payments (one page), newest first."""
+        """List payments (one page), newest first, optionally filtered."""
+        query = {
+            "account_id": account_id,
+            "agent_id": agent_id,
+            "kind": kind,
+            "status": status,
+            "cursor": cursor,
+            "limit": limit,
+        }
         return self._request(
-            ops.LIST_PAYMENTS,
-            ListPaymentsResponse,
-            query={"account_id": account_id, "status": status, "cursor": cursor, "limit": limit},
-            request_options=request_options,
+            ops.LIST_PAYMENTS, ListPaymentsResponse, query=query, request_options=request_options
         )
 
     def list_all(
         self,
         *,
         account_id: str | None = None,
+        agent_id: str | None = None,
+        kind: PaymentKind | None = None,
         status: PaymentStatus | None = None,
         limit: int | None = None,
         request_options: RequestOptions | None = None,
     ) -> Iterator[Payment]:
         """Iterate over every payment, following ``next_cursor``."""
+        query = {
+            "account_id": account_id,
+            "agent_id": agent_id,
+            "kind": kind,
+            "status": status,
+            "limit": limit,
+        }
         for page in self._paginate(
-            ops.LIST_PAYMENTS,
-            ListPaymentsResponse,
-            query={"account_id": account_id, "status": status, "limit": limit},
-            request_options=request_options,
+            ops.LIST_PAYMENTS, ListPaymentsResponse, query=query, request_options=request_options
         ):
             yield from page.data
 

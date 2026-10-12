@@ -82,6 +82,20 @@ UNFREEZE_ORG: Final = Operation(
     response_media_types=("application/json",),
 )
 
+ROTATE_OWNER: Final = Operation(
+    operation_id="rotateOwner",
+    method="POST",
+    path="/v1/orgs/me/owner",
+    auth=("principal",),
+    idempotent=True,
+    service="api",
+    success_status=200,
+    path_params=(),
+    query_params=(),
+    has_body=True,
+    response_media_types=("application/json",),
+)
+
 CREATE_TREASURY_ACCOUNT: Final = Operation(
     operation_id="createTreasuryAccount",
     method="POST",
@@ -277,6 +291,20 @@ CREATE_ACCOUNT: Final = Operation(
     response_media_types=("application/json",),
 )
 
+ATTACH_SPEND_KEY: Final = Operation(
+    operation_id="attachSpendKey",
+    method="PUT",
+    path="/v1/accounts/{id}/spend-key",
+    auth=("principal",),
+    idempotent=True,
+    service="api",
+    success_status=200,
+    path_params=("id",),
+    query_params=(),
+    has_body=True,
+    response_media_types=("application/json",),
+)
+
 LIST_ACCOUNTS: Final = Operation(
     operation_id="listAccounts",
     method="GET",
@@ -328,6 +356,26 @@ GET_BALANCES: Final = Operation(
     success_status=200,
     path_params=("id",),
     query_params=(),
+    has_body=False,
+    response_media_types=("application/json",),
+)
+
+LIST_SESSIONS: Final = Operation(
+    operation_id="listSessions",
+    method="GET",
+    path="/v1/sessions",
+    auth=("principal",),
+    idempotent=False,
+    service="api",
+    success_status=200,
+    path_params=(),
+    query_params=(
+        "cursor",
+        "limit",
+        "account_id",
+        "agent_id",
+        "status",
+    ),
     has_body=False,
     response_media_types=("application/json",),
 )
@@ -416,6 +464,25 @@ SUBMIT_OWNER_SIGNATURE: Final = Operation(
     path_params=("id",),
     query_params=(),
     has_body=True,
+    response_media_types=("application/json",),
+)
+
+LIST_MANDATES: Final = Operation(
+    operation_id="listMandates",
+    method="GET",
+    path="/v1/mandates",
+    auth=("principal",),
+    idempotent=False,
+    service="api",
+    success_status=200,
+    path_params=(),
+    query_params=(
+        "cursor",
+        "limit",
+        "agent_id",
+        "status",
+    ),
+    has_body=False,
     response_media_types=("application/json",),
 )
 
@@ -528,6 +595,8 @@ LIST_PAYMENTS: Final = Operation(
         "cursor",
         "limit",
         "account_id",
+        "agent_id",
+        "kind",
         "status",
     ),
     has_body=False,
@@ -700,6 +769,28 @@ REGISTER_X402_PAYEE: Final = Operation(
     response_media_types=("application/json",),
 )
 
+LIST_ESCROWS: Final = Operation(
+    operation_id="listEscrows",
+    method="GET",
+    path="/v1/escrows",
+    auth=(
+        "principal",
+        "agent",
+    ),
+    idempotent=False,
+    service="api",
+    success_status=200,
+    path_params=(),
+    query_params=(
+        "cursor",
+        "limit",
+        "account_id",
+        "status",
+    ),
+    has_body=False,
+    response_media_types=("application/json",),
+)
+
 CREATE_ESCROW: Final = Operation(
     operation_id="createEscrow",
     method="POST",
@@ -793,6 +884,28 @@ DISPUTE_ESCROW: Final = Operation(
     path_params=("id",),
     query_params=(),
     has_body=True,
+    response_media_types=("application/json",),
+)
+
+LIST_STREAMS: Final = Operation(
+    operation_id="listStreams",
+    method="GET",
+    path="/v1/streams",
+    auth=(
+        "principal",
+        "agent",
+    ),
+    idempotent=False,
+    service="api",
+    success_status=200,
+    path_params=(),
+    query_params=(
+        "cursor",
+        "limit",
+        "account_id",
+        "status",
+    ),
+    has_body=False,
     response_media_types=("application/json",),
 )
 
@@ -925,6 +1038,7 @@ LIST_ENTRIES: Final = Operation(
     query_params=(
         "cursor",
         "limit",
+        "payment_id",
     ),
     has_body=False,
     response_media_types=("application/json",),
@@ -1085,6 +1199,20 @@ LIST_FUNDS: Final = Operation(
     response_media_types=("application/json",),
 )
 
+GET_SWEEP_RULE: Final = Operation(
+    operation_id="getSweepRule",
+    method="GET",
+    path="/v1/accounts/{id}/sweep-rule",
+    auth=("principal",),
+    idempotent=False,
+    service="api",
+    success_status=200,
+    path_params=("id",),
+    query_params=(),
+    has_body=False,
+    response_media_types=("application/json",),
+)
+
 PUT_SWEEP_RULE: Final = Operation(
     operation_id="putSweepRule",
     method="PUT",
@@ -1232,6 +1360,70 @@ GET_REVENUE_REPORT: Final = Operation(
     response_media_types=("application/json",),
 )
 
+LIST_OWNER_OPERATIONS: Final = Operation(
+    operation_id="listOwnerOperations",
+    method="GET",
+    path="/v1/owner-operations",
+    auth=("principal",),
+    idempotent=False,
+    service="api",
+    success_status=200,
+    path_params=(),
+    query_params=(
+        "cursor",
+        "limit",
+        "account_id",
+        "status",
+    ),
+    has_body=False,
+    response_media_types=("application/json",),
+)
+
+PREPARE_OWNER_SWAP: Final = Operation(
+    operation_id="prepareOwnerSwap",
+    method="POST",
+    path="/v1/accounts/{id}/owner-swap",
+    auth=("principal",),
+    idempotent=True,
+    service="api",
+    success_status=201,
+    path_params=("id",),
+    query_params=(),
+    has_body=True,
+    response_media_types=("application/json",),
+)
+
+LIST_AUTO_TOP_UP_RULES: Final = Operation(
+    operation_id="listAutoTopUpRules",
+    method="GET",
+    path="/v1/auto-topup-rules",
+    auth=("principal",),
+    idempotent=False,
+    service="api",
+    success_status=200,
+    path_params=(),
+    query_params=(
+        "cursor",
+        "limit",
+    ),
+    has_body=False,
+    response_media_types=("application/json",),
+)
+
+SANDBOX_FAUCET: Final = Operation(
+    operation_id="sandboxFaucet",
+    method="POST",
+    path="/v1/sandbox/faucet",
+    auth=("principal",),
+    idempotent=True,
+    service="api",
+    success_status=200,
+    path_params=(),
+    query_params=(),
+    has_body=True,
+    response_media_types=("application/json",),
+)
+
 GET_META: Final = Operation(
     operation_id="getMeta",
     method="GET",
@@ -1266,6 +1458,7 @@ OPERATIONS: Final[dict[str, Operation]] = {
     "startKyb": START_KYB,
     "freezeOrg": FREEZE_ORG,
     "unfreezeOrg": UNFREEZE_ORG,
+    "rotateOwner": ROTATE_OWNER,
     "createTreasuryAccount": CREATE_TREASURY_ACCOUNT,
     "setTreasury": SET_TREASURY,
     "listApiKeys": LIST_API_KEYS,
@@ -1279,15 +1472,18 @@ OPERATIONS: Final[dict[str, Operation]] = {
     "freezeAgent": FREEZE_AGENT,
     "unfreezeAgent": UNFREEZE_AGENT,
     "createAccount": CREATE_ACCOUNT,
+    "attachSpendKey": ATTACH_SPEND_KEY,
     "listAccounts": LIST_ACCOUNTS,
     "getAccount": GET_ACCOUNT,
     "getBalances": GET_BALANCES,
+    "listSessions": LIST_SESSIONS,
     "createSession": CREATE_SESSION,
     "getSession": GET_SESSION,
     "revokeSession": REVOKE_SESSION,
     "installSession": INSTALL_SESSION,
     "getOwnerOperation": GET_OWNER_OPERATION,
     "submitOwnerSignature": SUBMIT_OWNER_SIGNATURE,
+    "listMandates": LIST_MANDATES,
     "createMandate": CREATE_MANDATE,
     "getMandate": GET_MANDATE,
     "revokeMandate": REVOKE_MANDATE,
@@ -1306,12 +1502,14 @@ OPERATIONS: Final[dict[str, Operation]] = {
     "x402Settle": X402_SETTLE,
     "x402Supported": X402_SUPPORTED,
     "registerX402Payee": REGISTER_X402_PAYEE,
+    "listEscrows": LIST_ESCROWS,
     "createEscrow": CREATE_ESCROW,
     "getEscrow": GET_ESCROW,
     "submitEscrowSignature": SUBMIT_ESCROW_SIGNATURE,
     "releaseEscrow": RELEASE_ESCROW,
     "refundEscrow": REFUND_ESCROW,
     "disputeEscrow": DISPUTE_ESCROW,
+    "listStreams": LIST_STREAMS,
     "createStream": CREATE_STREAM,
     "getStream": GET_STREAM,
     "submitStreamSignature": SUBMIT_STREAM_SIGNATURE,
@@ -1329,6 +1527,7 @@ OPERATIONS: Final[dict[str, Operation]] = {
     "getAutoTopUp": GET_AUTO_TOP_UP,
     "putAutoTopUp": PUT_AUTO_TOP_UP,
     "listFunds": LIST_FUNDS,
+    "getSweepRule": GET_SWEEP_RULE,
     "putSweepRule": PUT_SWEEP_RULE,
     "listWebhookEndpoints": LIST_WEBHOOK_ENDPOINTS,
     "createWebhookEndpoint": CREATE_WEBHOOK_ENDPOINT,
@@ -1339,6 +1538,10 @@ OPERATIONS: Final[dict[str, Operation]] = {
     "changePlan": CHANGE_PLAN,
     "getFees": GET_FEES,
     "getRevenueReport": GET_REVENUE_REPORT,
+    "listOwnerOperations": LIST_OWNER_OPERATIONS,
+    "prepareOwnerSwap": PREPARE_OWNER_SWAP,
+    "listAutoTopUpRules": LIST_AUTO_TOP_UP_RULES,
+    "sandboxFaucet": SANDBOX_FAUCET,
     "getMeta": GET_META,
     "health": HEALTH,
 }

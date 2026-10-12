@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from datetime import datetime
 from typing import Any, Literal
 
@@ -17,10 +17,22 @@ from agentbank._resource_helpers import (
 )
 from agentbank._resource_helpers import payee as normalize_payee
 from agentbank.errors import PaymentFailedError
-from agentbank.models import Escrow
+from agentbank.models import Escrow, ListEscrowsResponse
 from agentbank.money import MoneyInput, coerce_money
 
 __all__ = ["AsyncEscrows"]
+
+EscrowStatus = Literal[
+    "requires_signature",
+    "locking",
+    "locked",
+    "released",
+    "refunded",
+    "disputed",
+    "resolved",
+    "failed",
+    "canceled",
+]
 
 
 class AsyncEscrows(AsyncAPIResource):
@@ -31,6 +43,41 @@ class AsyncEscrows(AsyncAPIResource):
     payments; call :meth:`sign_and_submit` afterwards. :meth:`lock` creates and
     signs in one call.
     """
+
+    async def list(
+        self,
+        *,
+        account_id: str | None = None,
+        status: EscrowStatus | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> ListEscrowsResponse:
+        """List escrows (one page)."""
+        return await self._request(
+            ops.LIST_ESCROWS,
+            ListEscrowsResponse,
+            query={"account_id": account_id, "status": status, "cursor": cursor, "limit": limit},
+            request_options=request_options,
+        )
+
+    async def list_all(
+        self,
+        *,
+        account_id: str | None = None,
+        status: EscrowStatus | None = None,
+        limit: int | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> AsyncIterator[Escrow]:
+        """List escrows: iterate over every page, following ``next_cursor``."""
+        async for page in self._paginate(
+            ops.LIST_ESCROWS,
+            ListEscrowsResponse,
+            query={"account_id": account_id, "status": status, "limit": limit},
+            request_options=request_options,
+        ):
+            for item in page.data:
+                yield item
 
     async def create(
         self,

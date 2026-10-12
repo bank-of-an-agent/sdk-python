@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from datetime import datetime
 from typing import Any, Literal
 
@@ -19,14 +19,50 @@ from agentbank._resource_helpers import (
 from agentbank._resource_helpers import payee as normalize_payee
 from agentbank._sync.resources._base import APIResource
 from agentbank.errors import PaymentFailedError
-from agentbank.models import Stream
+from agentbank.models import ListStreamsResponse, Stream
 from agentbank.money import MoneyInput, coerce_money
 
 __all__ = ["Streams"]
 
+StreamStatus = Literal["requires_signature", "active", "paused", "completed", "canceled", "failed"]
+
 
 class Streams(APIResource):
     """Pre-funded per-second streams and recurring payments (``PaymentStreams``)."""
+
+    def list(
+        self,
+        *,
+        account_id: str | None = None,
+        status: StreamStatus | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> ListStreamsResponse:
+        """List streams (one page)."""
+        return self._request(
+            ops.LIST_STREAMS,
+            ListStreamsResponse,
+            query={"account_id": account_id, "status": status, "cursor": cursor, "limit": limit},
+            request_options=request_options,
+        )
+
+    def list_all(
+        self,
+        *,
+        account_id: str | None = None,
+        status: StreamStatus | None = None,
+        limit: int | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> Iterator[Stream]:
+        """List streams: iterate over every page, following ``next_cursor``."""
+        for page in self._paginate(
+            ops.LIST_STREAMS,
+            ListStreamsResponse,
+            query={"account_id": account_id, "status": status, "limit": limit},
+            request_options=request_options,
+        ):
+            yield from page.data
 
     def create(
         self,

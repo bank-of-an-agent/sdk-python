@@ -35,7 +35,7 @@ class Money(AgentBankModel):
 
 class OwnerAuthorization(AgentBankModel):
     """
-    EIP-712 OwnerAuthorization signature by the org owner key over the canonical request payload. Required for loosening changes and session installs.
+    EIP-712 OwnerAuthorization (domain: name "Agent Bank", version "1", chainId = GET /v1/meta owner_authorization_chain_id) signed by the org owner key. subject = id of the resource the action applies to; payload = this request body without owner_authorization, after schema defaults are applied, hashed as canonical JSON (keccak256). Valid for at most 15 minutes. See ownerPayloads in @agentbank/core for the exact subject and payload of every action.
     """
 
     signer: Annotated[
@@ -612,6 +612,11 @@ class Org(AgentBankModel):
     kyc_status: Literal["pending", "in_review", "approved", "rejected"]
     tier: Literal["free", "pro", "business", "enterprise"]
     status: Literal["active", "frozen"]
+    frozen_reason: str | None
+    pending_unfreeze_at: AwareDatetime | None
+    """
+    When a pending owner-signed unfreeze takes effect
+    """
     owner_address: Annotated[
         str,
         Field(
@@ -728,6 +733,41 @@ class UnfreezeRequest(AgentBankModel):
 
     reason: Annotated[str, Field(max_length=500, min_length=1)]
     owner_authorization: OwnerAuthorization
+
+
+class RotateOwnerRequest(AgentBankModel):
+    """
+    Voluntary rotation signed by the current owner key (action owner.rotate). The on-chain Safe owner must be changed with an owner operation as well.
+    """
+
+    new_owner_address: Annotated[
+        str,
+        Field(
+            examples=["0x1111111111111111111111111111111111111111"],
+            pattern="^0x[a-fA-F0-9]{40}$",
+        ),
+    ]
+    """
+    EVM address
+    """
+    owner_authorization: OwnerAuthorization
+
+
+class PrepareOwnerSwapRequest(AgentBankModel):
+    """
+    Prepare the owner operation that swaps the Safe owner on one account (signed by the current owner key).
+    """
+
+    new_owner_address: Annotated[
+        str,
+        Field(
+            examples=["0x1111111111111111111111111111111111111111"],
+            pattern="^0x[a-fA-F0-9]{40}$",
+        ),
+    ]
+    """
+    EVM address
+    """
 
 
 class SetTreasuryRequest(AgentBankModel):
@@ -847,6 +887,10 @@ class Account(AgentBankModel):
     """
     Per-agent x402 spend key holding a small float (see ADR 0001)
     """
+    spend_key_permit: Literal["none", "pending", "executed"]
+    """
+    Whether the float-recovery permit is on-chain yet
+    """
     module_versions: dict[str, str]
     created_at: AwareDatetime
     """
@@ -865,6 +909,45 @@ class CreateAccountRequest(AgentBankModel):
     ] = None
     """
     Address of the agent's x402 spend key, generated client-side by the SDK
+    """
+
+
+class SpendKeyPermit(AgentBankModel):
+    """
+    EIP-2612 USDC permit signed by the spend key with spender = the agent's smart account, so the owner can always sweep the x402 float back (ADR 0001).
+    """
+
+    value: Annotated[str, Field(pattern="^[0-9]+$")]
+    """
+    Allowance in USDC minor units (usually max uint256)
+    """
+    deadline: Annotated[str, Field(pattern="^[0-9]+$")]
+    nonce: Annotated[str, Field(pattern="^[0-9]+$")]
+    """
+    USDC nonces(spend key) at signing time
+    """
+    signature: Annotated[str, Field(pattern="^0x([a-fA-F0-9]{2})*$")]
+
+
+class AttachSpendKeyRequest(AgentBankModel):
+    """
+    Attach the agent's x402 spend key. The permit is executed on-chain in the account's next owner operation (normally the setup operation that installs the first session).
+    """
+
+    spend_key_address: Annotated[
+        str,
+        Field(
+            examples=["0x1111111111111111111111111111111111111111"],
+            pattern="^0x[a-fA-F0-9]{40}$",
+        ),
+    ]
+    """
+    EVM address
+    """
+    permit: SpendKeyPermit
+    owner_authorization: OwnerAuthorization
+    """
+    OwnerAuthorization with action "spend_key.set" over { account_id, spend_key_address }
     """
 
 
@@ -955,6 +1038,7 @@ class OwnerOperation(AgentBankModel):
         "vault.withdraw",
         "payment",
         "account.deploy",
+        "owner.swap",
     ]
     subject_id: str
     """
@@ -1016,6 +1100,10 @@ class Session(AgentBankModel):
     install_operation_id: Annotated[str | None, Field(pattern="^oop_[0-9A-HJKMNP-TV-Z]{26}$")]
     """
     Owner operation that installs the session on-chain (Smart Sessions)
+    """
+    revoke_operation_id: Annotated[str | None, Field(pattern="^oop_[0-9A-HJKMNP-TV-Z]{26}$")]
+    """
+    Owner operation that revokes the session on-chain (the hard backstop)
     """
     created_at: AwareDatetime
     """
@@ -1252,6 +1340,8 @@ class Payment(AgentBankModel):
     payment_request_id: Annotated[str | None, Field(pattern="^preq_[0-9A-HJKMNP-TV-Z]{26}$")]
     decision: PolicyDecision | None
     approval_id: Annotated[str | None, Field(pattern="^apr_[0-9A-HJKMNP-TV-Z]{26}$")]
+    escrow_id: Annotated[str | None, Field(pattern="^esc_[0-9A-HJKMNP-TV-Z]{26}$")]
+    stream_id: Annotated[str | None, Field(pattern="^str_[0-9A-HJKMNP-TV-Z]{26}$")]
     signing_request: SigningRequest | None
     owner_operation_id: Annotated[str | None, Field(pattern="^oop_[0-9A-HJKMNP-TV-Z]{26}$")]
     """
@@ -1764,6 +1854,10 @@ class Approval(AgentBankModel):
     amount: Money
     counterparty: Counterparty
     required_approvers: Annotated[int, Field(ge=1, le=9007199254740991)]
+    decision: PolicyDecision | None
+    """
+    The policy decision that required approval (rule hits)
+    """
     decisions: list[ApprovalDecision]
     status: Literal["pending", "approved", "denied", "expired"]
     expires_at: AwareDatetime
@@ -1928,6 +2022,7 @@ class Vault(AgentBankModel):
     EVM address
     """
     onchain_id: str | None
+    pending_operation_id: Annotated[str | None, Field(pattern="^oop_[0-9A-HJKMNP-TV-Z]{26}$")]
     created_at: AwareDatetime
     """
     ISO 8601 timestamp
@@ -1962,7 +2057,8 @@ class AutoTopUpRule(AgentBankModel):
     refill_to: Money
     when_below: Money
     max_per_day: Money
-    status: Literal["active", "disabled"]
+    status: Literal["pending_install", "active", "disabled"]
+    install_operation_id: Annotated[str | None, Field(pattern="^oop_[0-9A-HJKMNP-TV-Z]{26}$")]
     created_at: AwareDatetime
     """
     ISO 8601 timestamp
@@ -2366,6 +2462,41 @@ class Meta(AgentBankModel):
     features: dict[str, bool]
 
 
+class SandboxFaucetRequest(AgentBankModel):
+    account_id: Annotated[str | None, Field(pattern="^acct_[0-9A-HJKMNP-TV-Z]{26}$")] = None
+    address: Annotated[
+        str | None,
+        Field(
+            examples=["0x1111111111111111111111111111111111111111"],
+            pattern="^0x[a-fA-F0-9]{40}$",
+        ),
+    ] = None
+    """
+    EVM address
+    """
+    amount: Money
+
+
+class SandboxFaucetResponse(AgentBankModel):
+    """
+    Test USDC minted on the simulated chain or Anvil. Unavailable on Base Sepolia (use Circle's faucet).
+    """
+
+    object: Literal["faucet_transfer"]
+    address: Annotated[
+        str,
+        Field(
+            examples=["0x1111111111111111111111111111111111111111"],
+            pattern="^0x[a-fA-F0-9]{40}$",
+        ),
+    ]
+    """
+    EVM address
+    """
+    amount: Money
+    tx_hash: Annotated[str | None, Field(pattern="^0x[a-fA-F0-9]{64}$")]
+
+
 class Problem(AgentBankModel):
     """
     RFC 9457 problem details
@@ -2446,6 +2577,42 @@ class ListPlansResponse(AgentBankModel):
     data: list[Plan]
 
 
+class ListSessionsResponse(AgentBankModel):
+    data: list[Session]
+    next_cursor: str | None
+
+
+class ListMandatesResponse(AgentBankModel):
+    data: list[Mandate]
+    next_cursor: str | None
+
+
+class ListOwnerOperationsResponse(AgentBankModel):
+    data: list[OwnerOperation]
+    next_cursor: str | None
+
+
+class ListEscrowsResponse(AgentBankModel):
+    data: list[Escrow]
+    next_cursor: str | None
+
+
+class ListStreamsResponse(AgentBankModel):
+    data: list[Stream]
+    next_cursor: str | None
+
+
+class ListAutoTopUpRulesResponse(AgentBankModel):
+    data: list[AutoTopUpRule]
+    next_cursor: str | None
+
+
+GetSweepRuleResponse = TypeAliasType(
+    "GetSweepRuleResponse",
+    Annotated[SweepRule | None, Field(title="GetSweepRuleResponse")],
+)
+
+
 class HealthResponse(AgentBankModel):
     status: Literal["ok", "degraded"]
     checks: dict[str, str]
@@ -2466,6 +2633,7 @@ __all__ = [
     "Approval",
     "ApprovalDecision",
     "ApprovalThreshold",
+    "AttachSpendKeyRequest",
     "AutoSave",
     "AutoTopUpRule",
     "Balances",
@@ -2510,6 +2678,7 @@ __all__ = [
     "Fund",
     "FundEligibility",
     "GetAutoTopUpResponse",
+    "GetSweepRuleResponse",
     "HealthResponse",
     "Hostname",
     "IncomeSplit",
@@ -2521,12 +2690,18 @@ __all__ = [
     "ListAgentsResponse",
     "ListApiKeysResponse",
     "ListApprovalsResponse",
+    "ListAutoTopUpRulesResponse",
     "ListEntriesResponse",
+    "ListEscrowsResponse",
     "ListEventsResponse",
     "ListFundsResponse",
+    "ListMandatesResponse",
     "ListMembersResponse",
+    "ListOwnerOperationsResponse",
     "ListPaymentsResponse",
     "ListPlansResponse",
+    "ListSessionsResponse",
+    "ListStreamsResponse",
     "ListVaultsResponse",
     "ListWebhookEndpointsResponse",
     "Mandate",
@@ -2555,6 +2730,7 @@ __all__ = [
     "PolicyLimits",
     "PolicyVelocity",
     "PolicyVersion",
+    "PrepareOwnerSwapRequest",
     "Problem",
     "PutAutoTopUpRequest",
     "PutPolicyRequest",
@@ -2563,14 +2739,18 @@ __all__ = [
     "RegisterX402PayeeRequest",
     "RevenueByStreamAdditionalProperty",
     "RevenueReport",
+    "RotateOwnerRequest",
     "RoundUp",
     "RuleHit",
+    "SandboxFaucetRequest",
+    "SandboxFaucetResponse",
     "ScheduledSave",
     "Secp256k1Jwk",
     "Session",
     "SessionScope",
     "SetTreasuryRequest",
     "SigningRequest",
+    "SpendKeyPermit",
     "Statement",
     "StatementLine",
     "Stream",

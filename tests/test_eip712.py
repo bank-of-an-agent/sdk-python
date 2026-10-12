@@ -62,6 +62,8 @@ def test_owner_actions_match_the_typescript_list() -> None:
         "sweep.set",
         "treasury.set",
         "vault.withdraw",
+        "owner.rotate",
+        "spend_key.set",
     )
 
 

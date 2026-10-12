@@ -129,3 +129,43 @@ class AsyncOrgs(AsyncAPIResource):
             idempotency_key=idempotency_key,
             request_options=request_options,
         )
+
+    async def rotate_owner(
+        self,
+        *,
+        new_owner_address: str,
+        owner_authorization: dict[str, Any] | None = None,
+        owner: SignerLike | SessionKey | None = None,
+        idempotency_key: str | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> Org:
+        """Rotate the org's owner key in Agent Bank and the co-signer (``owner.rotate``).
+
+        Signed by the **current** owner key. Order matters: first swap the owner of
+        every account with ``owner_operations.prepare_owner_swap`` (signed with the
+        old key), then call this. Lost keys are recovered on-chain with guardians
+        instead.
+
+        Args:
+            new_owner_address: The new owner key's address.
+            owner_authorization: A pre-signed ``owner.rotate`` authorization
+                (subject = the org id, payload ``{"new_owner_address": ...}``).
+            owner: Alternatively, the current owner key; the SDK looks up the org id
+                and signs it.
+            idempotency_key: Optional key; generated when omitted.
+            request_options: Per-request overrides.
+        """
+        body: dict[str, Any] = {"new_owner_address": new_owner_address}
+        if owner_authorization is not None:
+            body["owner_authorization"] = owner_authorization
+        elif owner is not None:
+            org = await self.retrieve(request_options=request_options)
+            rotation = owner_payloads.owner_rotate(org.id, new_owner_address)
+            body["owner_authorization"] = await self._owner_authorization(owner, rotation)
+        return await self._request(
+            ops.ROTATE_OWNER,
+            Org,
+            body=body,
+            idempotency_key=idempotency_key,
+            request_options=request_options,
+        )

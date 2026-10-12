@@ -2,21 +2,58 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import AsyncIterator, Mapping
+from typing import Any, Literal
 
 from agentbank import _operations as ops
 from agentbank import owner_payloads
 from agentbank._async.resources._base import AsyncAPIResource
 from agentbank._base_client import RequestOptions
 from agentbank.keys import SessionKey, SignerLike
-from agentbank.models import Mandate, OpenPaymentMandate
+from agentbank.models import ListMandatesResponse, Mandate, OpenPaymentMandate
 
 __all__ = ["AsyncMandates"]
+
+MandateStatus = Literal["active", "expired", "revoked"]
 
 
 class AsyncMandates(AsyncAPIResource):
     """AP2 open Payment Mandates granting an agent bounded authority."""
+
+    async def list(
+        self,
+        *,
+        agent_id: str | None = None,
+        status: MandateStatus | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> ListMandatesResponse:
+        """List mandates (one page)."""
+        return await self._request(
+            ops.LIST_MANDATES,
+            ListMandatesResponse,
+            query={"agent_id": agent_id, "status": status, "cursor": cursor, "limit": limit},
+            request_options=request_options,
+        )
+
+    async def list_all(
+        self,
+        *,
+        agent_id: str | None = None,
+        status: MandateStatus | None = None,
+        limit: int | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> AsyncIterator[Mandate]:
+        """List mandates: iterate over every page, following ``next_cursor``."""
+        async for page in self._paginate(
+            ops.LIST_MANDATES,
+            ListMandatesResponse,
+            query={"agent_id": agent_id, "status": status, "limit": limit},
+            request_options=request_options,
+        ):
+            for item in page.data:
+                yield item
 
     async def create(
         self,

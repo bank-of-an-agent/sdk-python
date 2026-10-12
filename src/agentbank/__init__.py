@@ -15,7 +15,7 @@ Testnet only (Base Sepolia). Quick tour::
 Everything is also available asynchronously via :class:`AsyncAgentBank`.
 """
 
-from agentbank import models, owner_payloads
+from agentbank import flows, models, owner_payloads, spend_key
 from agentbank._async.client import AsyncAgentBank
 from agentbank._async.x402 import AsyncX402Transport
 from agentbank._base_client import RequestOptions
@@ -58,9 +58,11 @@ from agentbank.errors import (
     UnprocessableEntityError,
     X402Error,
 )
+from agentbank.flows import GrantSessionResult, SetupAgentAccountResult
 from agentbank.http_signatures import content_digest, sign_request, verify_request
 from agentbank.keys import EthSigner, SessionKey, generate_session_key, generate_spend_key
 from agentbank.money import format_amount, money, parse_amount
+from agentbank.spend_key import sign_spend_key_permit, spend_key_permit_typed_data
 from agentbank.webhooks import WebhookEvent, construct_event, sign_webhook, verify_webhook
 from agentbank.x402 import X402Receipt, x402_receipt
 
@@ -80,6 +82,7 @@ __all__ = [
     "ConflictError",
     "EthSigner",
     "FrozenError",
+    "GrantSessionResult",
     "IdempotencyConflictError",
     "InsufficientFundsError",
     "InternalServerError",
@@ -96,6 +99,7 @@ __all__ = [
     "RequestOptions",
     "ServiceUnavailableError",
     "SessionKey",
+    "SetupAgentAccountResult",
     "SignatureVerificationError",
     "UnprocessableEntityError",
     "WebhookEvent",
@@ -109,6 +113,7 @@ __all__ = [
     "canonical_sha256",
     "construct_event",
     "content_digest",
+    "flows",
     "format_amount",
     "generate_session_key",
     "generate_spend_key",
@@ -119,7 +124,10 @@ __all__ = [
     "owner_payloads",
     "parse_amount",
     "sign_request",
+    "sign_spend_key_permit",
     "sign_webhook",
+    "spend_key",
+    "spend_key_permit_typed_data",
     "verify_owner_authorization",
     "verify_request",
     "verify_webhook",
