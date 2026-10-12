@@ -9,7 +9,7 @@ versions may contain breaking changes.
 
 ## [0.1.0] - Unreleased
 
-First release, built against Agent Bank API 0.1.0 (`openapi.json`, 80
+First release, built against Agent Bank API 0.1.0 (`openapi.json`, 91
 operations) and aligned with the TypeScript SDK (`@agentbank/sdk`). Testnet
 (Base Sepolia) only.
 
@@ -27,12 +27,15 @@ operations) and aligned with the TypeScript SDK (`@agentbank/sdk`). Testnet
   problem details mapped to an `AgentBankError` hierarchy with `.code`,
   `.status` and `.detail`. Malformed success responses raise
   `APIResponseValidationError`.
-- Resource namespaces for every API operation, with the TypeScript SDK's method
-  names: `orgs`, `api_keys`, `members`, `agents`, `accounts`, `sessions`,
-  `owner_operations`, `mandates`, `policies`, `payments`, `payment_requests`,
-  `x402`, `escrows`, `streams`, `approvals`, `ledger`, `vaults`, `treasury`,
-  `webhooks`, `billing`, plus `health()`, `meta()` (cached) and a low-level
-  `call(operation_id, ...)`. Lists have `list_all()` auto-pagination.
+- Resource namespaces for every API operation except the staff-only
+  `getRevenueReport`, with the TypeScript SDK's method names: `orgs`,
+  `api_keys`, `members`, `agents`, `accounts`, `sessions`, `owner_operations`,
+  `mandates`, `policies`, `payments`, `payment_requests`, `x402`, `escrows`,
+  `streams`, `approvals`, `ledger`, `vaults`, `treasury`, `webhooks`, `billing`,
+  `sandbox`, plus `health()`, `meta()` (cached) and a low-level
+  `call(operation_id, ...)`. Lists (including sessions, mandates, owner
+  operations, escrows, streams and auto top-up rules) have `list_all()`
+  auto-pagination.
 - `payments.pay()` (also `client.pay()`): create, check that the API created the
   payment that was asked for, sign `signing_request.user_op_hash` (EIP-191 over
   the raw 32 bytes) with the session key, submit; optionally wait for a human
@@ -46,9 +49,23 @@ operations) and aligned with the TypeScript SDK (`@agentbank/sdk`). Testnet
   (for hardware wallets), `verify_owner_authorization()` and `owner_payloads`
   (canonical subject and payload per action, schema defaults applied, as in
   `ownerPayloads` of `@agentbank/core`). `owner=` arguments sign session grants,
-  policy loosening, mandates, unfreezing, treasury, auto top-up, sweep and vault
-  withdrawals in the deployment's EIP-712 domain (`owner_authorization_chain_id`
-  from `GET /v1/meta`).
+  policy loosening, mandates, unfreezing, owner rotation, spend-key attachment,
+  treasury, auto top-up, sweep and vault withdrawals in the deployment's EIP-712
+  domain (`owner_authorization_chain_id` from `GET /v1/meta`).
+- Spend-key float recovery (ADR 0001): `sign_spend_key_permit()` and
+  `spend_key_permit_typed_data()` sign the EIP-2612 USDC permit (owner = the
+  spend key, spender = the agent's smart account, value and deadline max uint256
+  by default) in the USDC domain from `GET /v1/meta`;
+  `accounts.attach_spend_key()` sends it with a `spend_key.set` authorization.
+- Principal helpers matching the TypeScript SDK: `provision_spend_key()`,
+  `grant_session()` (24-hour default expiry, at most 7 days) and
+  `setup_agent_account()`, which creates the account, signs the permit for its
+  address, attaches the spend key, then grants and installs the first session,
+  with per-step idempotency keys so a failed setup can be re-run.
+- Owner key rotation: `owner_operations.prepare_owner_swap()` (signed by the
+  current owner, optionally waited on with `owner_operations.wait()`), then
+  `orgs.rotate_owner()` (`owner.rotate`).
+- `sandbox.faucet()` mints test USDC on the simulated chain and Anvil.
 - x402 pay-per-call: `X402Transport` / `AsyncX402Transport` for `httpx`, and
   `client.x402.client()` / `fetch()`. Parses x402 v2 `PAYMENT-REQUIRED` headers
   and v1 JSON bodies, picks the cheapest `exact` USDC (EIP-3009) option on the
@@ -67,7 +84,9 @@ operations) and aligned with the TypeScript SDK (`@agentbank/sdk`). Testnet
   `scripts/refresh_openapi.sh` refreshes the spec from the monorepo.
 - Mainnet chain ids are refused everywhere the SDK signs.
 - Cross-language test vectors shared with `@agentbank/core`, plus viem-generated
-  EIP-3009 and user-operation signatures; all reproduce byte for byte.
+  EIP-3009, EIP-2612 permit and user-operation signatures; all reproduce byte
+  for byte. Permit digests are also checked against a hand-built FiatToken
+  `permit` digest.
 
 [Unreleased]: https://github.com/bank-of-an-agent/sdk-python/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/bank-of-an-agent/sdk-python/releases/tag/v0.1.0

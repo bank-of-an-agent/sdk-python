@@ -10,9 +10,11 @@ from types import ModuleType
 import pytest
 import respx
 
-from agentbank import AgentBank
-from tests.conftest import ACCOUNT_ID, AGENT_ID
-from tests.factories import SCHEMAS, build
+from agentbank import AgentBank, SessionKey, owner_payloads
+from tests.conftest import ACCOUNT_ID, AGENT_ID, API_KEY, BASE_URL, ORG_ID, OWNER_KEY, SESSION_ID
+from tests.factories import SCHEMAS, build, example
+from tests.test_principal_flows import SMART_ACCOUNT, body_of, mock_setup_routes, verify
+from tests.test_spend_key import fiat_token_permit_digest, recover
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 EXAMPLES = sorted(EXAMPLES_DIR.glob("*.py"))
@@ -65,3 +67,47 @@ def test_money_tools(agent: AgentBank, api: respx.MockRouter) -> None:
         router.get("https://free.example/data").respond(200, text="free data")
         result = tools["fetch_paid_resource"].invoke({"url": "https://free.example/data"})
     assert result == "HTTP 200: free data"
+
+
+def test_principal_setup_example(
+    api: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    routes = mock_setup_routes(api)
+    api.get("/v1/orgs/me").respond(json=example("Org", id=ORG_ID))
+    api.post("/v1/agents").respond(201, json=example("Agent", id=AGENT_ID))
+    policy = api.put(f"/v1/agents/{AGENT_ID}/policy").respond(json=example("AgentPolicy"))
+    monkeypatch.setenv("AGENTBANK_BASE_URL", BASE_URL)
+    monkeypatch.setenv("AGENTBANK_API_KEY", API_KEY)
+    monkeypatch.setenv("AGENTBANK_OWNER_KEY", OWNER_KEY)
+    monkeypatch.chdir(tmp_path)
+
+    load(EXAMPLES_DIR / "principal_setup.py").main()
+
+    output = capsys.readouterr().out
+    assert f"export AGENTBANK_ACCOUNT_ID={ACCOUNT_ID}" in output
+    assert f"export AGENTBANK_SESSION_ID={SESSION_ID}" in output
+    assert "(permit executed)" in output
+    policy_body = body_of(policy)
+    authorization = policy_body.pop("owner_authorization")
+    verify(owner_payloads.policy_loosen(AGENT_ID, policy_body["policy"]), authorization)
+    # The saved spend key (0600) signed the float-recovery permit for the smart account.
+    key_file = tmp_path / ".agentbank" / "spend.json"
+    assert key_file.stat().st_mode & 0o777 == 0o600
+    spend_key = SessionKey.load(key_file)
+    attach = body_of(routes["attach"])
+    assert attach["spend_key_address"] == spend_key.address
+    permit = attach["permit"]
+    digest = fiat_token_permit_digest(
+        owner=spend_key.address,
+        spender=SMART_ACCOUNT,
+        value=int(permit["value"]),
+        nonce=0,
+        deadline=int(permit["deadline"]),
+    )
+    assert recover(digest, permit["signature"]) == spend_key.address
+    assert routes["sign"].calls.last.request.headers["idempotency-key"] == (
+        f"setup-{AGENT_ID}.session.sign"
+    )
